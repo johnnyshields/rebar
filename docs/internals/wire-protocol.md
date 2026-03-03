@@ -182,3 +182,11 @@ assert_eq!(decoded.request_id, 42);
 ```
 
 The decode path first reads the 18-byte fixed header, validates the message type byte `0x01` maps to `MsgType::Send`, confirms the buffer contains at least `18 + 11 + 6 = 35` bytes, then deserializes the header and payload slices from MessagePack back into `rmpv::Value` instances.
+
+---
+
+## See Also
+
+- [rebar-cluster API Reference](../api/rebar-cluster.md) -- public API for `Frame`, `MsgType`, `FrameError`, and the transport traits
+- [SWIM Protocol Internals](swim-protocol.md) -- how Heartbeat and HeartbeatAck message types are used for failure detection
+- [Architecture](../architecture.md) -- where the wire protocol sits in the crate dependency graph

@@ -660,6 +660,7 @@ In OTP style, supervisors use monitors to watch children (so the supervisor can 
 ## Next Steps
 
 - Read the [Architecture Guide](architecture.md) for a deeper understanding of Rebar's internals.
-- See the [Extending Rebar](extending.md) guide for building custom supervision patterns.
-- Check the [API Reference](api/rebar-core.md) for complete type documentation.
+- See the [Extending Rebar](extending.md) guide for building custom supervision patterns, transports, and registry backends.
+- Check the API Reference: [rebar-core](api/rebar-core.md) | [rebar-cluster](api/rebar-cluster.md) | [rebar-ffi](api/rebar-ffi.md) for complete type documentation.
+- Explore the internals: [Supervisor Engine](internals/supervisor-engine.md) | [Wire Protocol](internals/wire-protocol.md) | [SWIM Protocol](internals/swim-protocol.md) | [CRDT Registry](internals/crdt-registry.md).
 - Run the [benchmarks](benchmarks.md) to see Rebar's performance characteristics.

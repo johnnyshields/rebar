@@ -280,3 +280,12 @@ struct ChildState {
 - `shutdown_tx` is `Some` when the child is running. Sending a value or dropping it triggers shutdown in the child's `tokio::select!`.
 - `restart_times` grows and shrinks as restarts occur and old entries are pruned.
 - `strategy`, `max_restarts`, and `max_seconds` are copied from the `SupervisorSpec` at startup and do not change.
+
+---
+
+## See Also
+
+- [rebar-core API Reference](../api/rebar-core.md) -- public API for `SupervisorSpec`, `ChildSpec`, `ChildEntry`, `SupervisorHandle`, and `start_supervisor()`
+- [Getting Started](../getting-started.md) -- runnable supervisor examples with progressive complexity
+- [Extending Rebar](../extending.md) -- building custom supervisor strategies, worker pools, and nested supervision trees
+- [Architecture](../architecture.md) -- how supervisors fit into the overall process model

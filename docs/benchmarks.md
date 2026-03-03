@@ -208,3 +208,11 @@ Run individual stacks:
 ```
 
 Results are saved to `bench/results/` with a summary report at `bench/results/report.md`.
+
+---
+
+## See Also
+
+- [Architecture](architecture.md) -- for understanding Rebar's crate structure and process model
+- [Getting Started](getting-started.md) -- for running your own Rebar applications
+- [rebar-core API Reference](api/rebar-core.md) -- for the Runtime, ProcessContext, and supervisor APIs used in the benchmark services

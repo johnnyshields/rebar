@@ -1075,3 +1075,14 @@ match mgr.attempt_reconnect(1).await {
     _ => {}
 }
 ```
+
+---
+
+## See Also
+
+- [Wire Protocol Internals](../internals/wire-protocol.md) -- detailed encoding/decoding walkthrough and byte-level wire format
+- [SWIM Protocol Internals](../internals/swim-protocol.md) -- failure detection mechanics, incarnation numbers, and gossip dissemination
+- [CRDT Registry Internals](../internals/crdt-registry.md) -- OR-Set merge semantics, tombstone lifecycle, and convergence proofs
+- [rebar-core API Reference](rebar-core.md) -- the local runtime that rebar-cluster extends with distribution
+- [Architecture](../architecture.md) -- how rebar-core and rebar-cluster fit together
+- [Extending Rebar](../extending.md) -- implementing custom transports and registry backends

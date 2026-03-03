@@ -1,6 +1,6 @@
 # rebar-core API Reference
 
-`rebar-core` provides the local actor runtime for Rebar -- process spawning, message passing, monitoring, linking, and OTP-style supervision. Everything runs on a single node with zero networking. Distribution is handled by the separate `rebar-dist` crate.
+`rebar-core` provides the local actor runtime for Rebar -- process spawning, message passing, monitoring, linking, and OTP-style supervision. Everything runs on a single node with zero networking. Distribution is handled by the separate `rebar-cluster` crate.
 
 **Crate:** `rebar-core` v0.1.0<br>
 **Dependencies:** tokio, dashmap, rmpv, serde, thiserror, tracing
@@ -877,3 +877,13 @@ A `SupervisorHandle` with the supervisor's PID and a channel for sending command
 2. The supervisor enters an event loop, listening for child exits and commands.
 3. When a child exits, the supervisor checks `RestartType::should_restart()` and applies the configured `RestartStrategy`.
 4. If the number of restarts within `max_seconds` exceeds `max_restarts`, the supervisor shuts down all children and exits.
+
+---
+
+## See Also
+
+- [Supervisor Engine Internals](../internals/supervisor-engine.md) -- deep dive into restart limiting, child lifecycle, and shutdown strategies
+- [Architecture](../architecture.md) -- overview of the crate structure and process model
+- [Getting Started](../getting-started.md) -- progressive examples using the APIs documented here
+- [rebar-cluster API Reference](rebar-cluster.md) -- the distribution layer built on top of rebar-core
+- [rebar-ffi API Reference](rebar-ffi.md) -- C-ABI bindings that wrap these APIs

@@ -987,3 +987,11 @@ impl PersistentRegistry {
 - **Redis-backed registry** -- use Redis sorted sets with timestamp scores for natural LWW ordering, with pub/sub for delta propagation.
 - **Cache layer** -- wrap the in-memory OR-Set with an LRU cache for hot name lookups, falling through to the CRDT for cold names.
 - **Raft-based registry** -- trade availability for strong consistency by running name registration through a Raft consensus group instead of CRDT merge.
+
+---
+
+## See Also
+
+- **API Reference:** [rebar-core](api/rebar-core.md) | [rebar-cluster](api/rebar-cluster.md) | [rebar-ffi](api/rebar-ffi.md)
+- **Internals:** [Wire Protocol](internals/wire-protocol.md) | [SWIM Protocol](internals/swim-protocol.md) | [CRDT Registry](internals/crdt-registry.md) | [Supervisor Engine](internals/supervisor-engine.md)
+- **Guides:** [Getting Started](getting-started.md) | [Architecture](architecture.md)

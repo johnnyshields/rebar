@@ -558,3 +558,12 @@ flowchart LR
 | `rebar_send_named`   | `(rt, name: *const u8, name_len, msg) -> i32`                        | Send message by name                 |
 
 All pointer-accepting functions perform null checks and return `REBAR_ERR_NULL_PTR` for null arguments. Passing null to `_free` functions is a safe no-op, following the convention of C's `free()`.
+
+---
+
+## See Also
+
+- **API Reference:** [rebar-core](api/rebar-core.md) | [rebar-cluster](api/rebar-cluster.md) | [rebar-ffi](api/rebar-ffi.md)
+- **Deep Dives:** [Supervisor Engine Internals](internals/supervisor-engine.md) | [Wire Protocol Internals](internals/wire-protocol.md) | [SWIM Protocol Internals](internals/swim-protocol.md) | [CRDT Registry Internals](internals/crdt-registry.md)
+- **Guides:** [Getting Started](getting-started.md) | [Extending Rebar](extending.md)
+- **Performance:** [Benchmarks](benchmarks.md)

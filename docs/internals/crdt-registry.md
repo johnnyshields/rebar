@@ -264,3 +264,12 @@ This is a deliberate trade-off:
 - **Memory cost**: Each tombstone is a single `Uuid` (16 bytes). Over time, this set grows monotonically.
 
 **Future work:** Tombstone expiration could be added with a protocol guarantee that deltas older than some threshold will never be delivered. This would allow periodic GC of old tombstones, bounding memory usage. However, this requires careful coordination with the delta replication layer to ensure safety.
+
+---
+
+## See Also
+
+- [rebar-cluster API Reference](../api/rebar-cluster.md) -- public API for `Registry`, `RegistryEntry`, `RegistryDelta`, and conflict resolution
+- [SWIM Protocol Internals](swim-protocol.md) -- SWIM node-down events trigger `remove_by_node()` to purge stale registrations
+- [Extending Rebar](../extending.md) -- building custom registry backends (persistent storage, Redis, Raft-based)
+- [Architecture](../architecture.md) -- how the registry fits into the rebar-cluster crate

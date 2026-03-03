@@ -846,3 +846,11 @@ const rt = lib.symbols.rebar_runtime_new(1n);
 // Clean up on exit
 using _ = { [Symbol.dispose]: () => lib.symbols.rebar_runtime_free(rt) };
 ```
+
+---
+
+## See Also
+
+- [Extending Rebar](../extending.md) -- step-by-step guide for building FFI bindings for new languages, including Ruby and Python examples
+- [rebar-core API Reference](rebar-core.md) -- the Rust APIs that rebar-ffi wraps
+- [Architecture](../architecture.md) -- how the FFI layer fits into the overall crate structure

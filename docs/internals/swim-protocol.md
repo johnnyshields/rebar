@@ -272,3 +272,12 @@ For a cluster of N nodes, a single membership change propagates to all nodes in 
 - A 1000-node cluster converges in ~10 ticks (~10 seconds).
 
 All membership changes -- joins (Alive), suspicions (Suspect), failures (Dead), and graceful departures (Leave) -- are eventually propagated to all nodes. The `max_gossip_per_tick` parameter bounds the per-message overhead while ensuring the queue drains over successive ticks.
+
+---
+
+## See Also
+
+- [rebar-cluster API Reference](../api/rebar-cluster.md) -- public API for `Member`, `MembershipList`, `SwimConfig`, `FailureDetector`, and `GossipQueue`
+- [Wire Protocol Internals](wire-protocol.md) -- the Heartbeat and HeartbeatAck frame types used by SWIM probes
+- [CRDT Registry Internals](crdt-registry.md) -- the registry uses SWIM node-down events to trigger `remove_by_node()` cleanup
+- [Architecture](../architecture.md) -- how the SWIM module fits into the rebar-cluster crate
