@@ -1,0 +1,73 @@
+name: elixir-bench
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: bench/elixir/Dockerfile
+    command: sh -c "cd /opt/gateway && mix run --no-halt"
+    environment:
+      COMPUTE_HOST: compute
+      STORE_HOST: store
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    depends_on:
+      compute:
+        condition: service_healthy
+      store:
+        condition: service_healthy
+    networks:
+      - mesh
+
+  compute:
+    build:
+      context: ..
+      dockerfile: bench/elixir/Dockerfile
+    command: sh -c "cd /opt/compute && mix run --no-halt"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - mesh
+
+  store:
+    build:
+      context: ..
+      dockerfile: bench/elixir/Dockerfile
+    command: sh -c "cd /opt/store && mix run --no-halt"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - mesh
+
+networks:
+  mesh:
+    driver: bridge

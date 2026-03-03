@@ -1,0 +1,78 @@
+name: actix-bench
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: bench/actix/Dockerfile
+    command: gateway
+    environment:
+      COMPUTE_HOST: compute
+      STORE_HOST: store
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    depends_on:
+      compute:
+        condition: service_healthy
+      store:
+        condition: service_healthy
+    networks:
+      - mesh
+
+  compute:
+    build:
+      context: ..
+      dockerfile: bench/actix/Dockerfile
+    command: compute
+    environment:
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - mesh
+
+  store:
+    build:
+      context: ..
+      dockerfile: bench/actix/Dockerfile
+    command: store
+    environment:
+      RUST_LOG: info
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - mesh
+
+networks:
+  mesh:
+    driver: bridge
