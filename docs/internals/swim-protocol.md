@@ -60,10 +60,10 @@ Transitions between states follow strict rules enforced by the `Member` methods 
 stateDiagram-v2
     [*] --> Alive : Member::new()
 
-    Alive --> Suspect : Direct probe fails<br>(no ACK received)
-    Suspect --> Alive : ACK received<br>(incarnation bumped)
-    Suspect --> Dead : suspect_timeout exceeded<br>(default: 5s)
-    Dead --> Removed : dead_removal_delay exceeded<br>(default: 30s)
+    Alive --> Suspect : Direct probe fails (no ACK)
+    Suspect --> Alive : ACK received (incarnation bumped)
+    Suspect --> Dead : suspect_timeout exceeded (5s)
+    Dead --> Removed : dead_removal_delay exceeded (30s)
 
     Removed --> [*]
 ```

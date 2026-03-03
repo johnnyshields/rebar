@@ -278,10 +278,10 @@ Rebar uses the SWIM (Scalable Weakly-consistent Infection-style process group Me
 stateDiagram-v2
     [*] --> Alive : Node joins cluster
 
-    Alive --> Suspect : Direct probe fails<br>(no ACK received)
-    Suspect --> Alive : ACK received<br>(direct or indirect probe)
-    Suspect --> Dead : suspect_timeout expires<br>(default: 5s)
-    Dead --> Removed : dead_removal_delay<br>expires (default: 30s)
+    Alive --> Suspect : Direct probe fails (no ACK)
+    Suspect --> Alive : ACK received (direct or indirect)
+    Suspect --> Dead : suspect_timeout expires (5s)
+    Dead --> Removed : dead_removal_delay expires (30s)
 
     Removed --> [*]
 ```
