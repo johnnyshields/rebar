@@ -74,6 +74,19 @@ Important constraints from the implementation:
 - **Incarnation guards suspect.** `member.suspect(incarnation)` only transitions to Suspect if `incarnation >= self.incarnation`. Stale suspicions with a lower incarnation are ignored.
 - **Incarnation guards alive.** `member.alive(incarnation)` only transitions to Alive if `incarnation > self.incarnation` (strictly greater). This prevents replayed or stale Alive messages from overriding a legitimate suspicion.
 
+### Certificate Fingerprint Exchange
+
+The `Member` struct includes an optional `cert_hash: Option<[u8; 32]>` field — the SHA-256 fingerprint of the node's TLS certificate. The `GossipUpdate::Alive` variant also carries this field.
+
+When a node generates its self-signed certificate (via `generate_self_signed_cert()`), it advertises the fingerprint in its SWIM gossip messages. Other nodes store this in their `MembershipList` and use it to verify QUIC connections without a certificate authority.
+
+The flow:
+1. Node A generates cert → computes `cert_fingerprint()` → stores in its `Member` record
+2. Node A broadcasts `GossipUpdate::Alive { cert_hash: Some(hash), .. }`
+3. Node B receives the gossip, stores `cert_hash` in its membership list
+4. Node B connects to Node A via QUIC, passing `cert_hash` to `FingerprintVerifier`
+5. TLS handshake succeeds only if the certificate matches the gossiped fingerprint
+
 ## Protocol Period (Tick Loop)
 
 Each protocol period (default: 1 second), the failure detection loop executes the following steps:
