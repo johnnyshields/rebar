@@ -9,3 +9,9 @@ description = "A BEAM-inspired distributed actor runtime"
 [dependencies]
 rebar-core = { path = "../rebar-core" }
 rebar-cluster = { path = "../rebar-cluster" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+rmpv = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
