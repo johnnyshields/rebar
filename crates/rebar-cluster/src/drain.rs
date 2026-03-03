@@ -1,4 +1,8 @@
+use std::net::SocketAddr;
 use std::time::Duration;
+
+use crate::registry::Registry;
+use crate::swim::gossip::{GossipQueue, GossipUpdate};
 
 /// Configuration for the three-phase drain protocol.
 #[derive(Debug, Clone)]
@@ -34,9 +38,48 @@ pub struct DrainResult {
     pub timed_out: bool,
 }
 
+/// Orchestrates the three-phase drain protocol.
+pub struct NodeDrain {
+    config: DrainConfig,
+}
+
+impl NodeDrain {
+    pub fn new(config: DrainConfig) -> Self {
+        Self { config }
+    }
+
+    /// Phase 1: Announce departure to the cluster.
+    /// - Broadcasts Leave via SWIM gossip
+    /// - Unregisters all names from the registry
+    /// Returns the number of names unregistered.
+    pub fn announce(
+        &self,
+        node_id: u64,
+        addr: SocketAddr,
+        gossip: &mut GossipQueue,
+        registry: &mut Registry,
+    ) -> usize {
+        gossip.add(GossipUpdate::Leave { node_id, addr });
+
+        let names_before = registry.registered().len();
+        registry.remove_by_node(node_id);
+        let names_after = registry.registered().len();
+
+        names_before - names_after
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Registry;
+    use crate::swim::gossip::{GossipQueue, GossipUpdate};
+    use rebar_core::process::ProcessId;
+    use std::net::SocketAddr;
+
+    fn test_addr() -> SocketAddr {
+        "127.0.0.1:4000".parse().unwrap()
+    }
 
     #[test]
     fn drain_config_defaults() {
@@ -71,5 +114,39 @@ mod tests {
         assert_eq!(result.processes_stopped, 10);
         assert_eq!(result.messages_drained, 50);
         assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn drain_broadcasts_leave() {
+        let drain = NodeDrain::new(DrainConfig::default());
+        let mut gossip = GossipQueue::new();
+        let mut registry = Registry::default();
+
+        drain.announce(1, test_addr(), &mut gossip, &mut registry);
+
+        let updates = gossip.drain(10);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], GossipUpdate::Leave { node_id: 1, .. }));
+    }
+
+    #[test]
+    fn drain_unregisters_names() {
+        let drain = NodeDrain::new(DrainConfig::default());
+        let mut gossip = GossipQueue::new();
+        let mut registry = Registry::default();
+
+        registry.register("service_a", ProcessId::new(1, 1), 1, 100);
+        registry.register("service_b", ProcessId::new(1, 2), 1, 101);
+        registry.register("service_c", ProcessId::new(2, 1), 2, 102);
+
+        assert_eq!(registry.registered().len(), 3);
+
+        let removed = drain.announce(1, test_addr(), &mut gossip, &mut registry);
+
+        assert_eq!(removed, 2);
+        assert_eq!(registry.registered().len(), 1);
+        assert!(registry.lookup("service_c").is_some());
+        assert!(registry.lookup("service_a").is_none());
+        assert!(registry.lookup("service_b").is_none());
     }
 }
