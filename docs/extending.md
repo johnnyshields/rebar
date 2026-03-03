@@ -938,5 +938,5 @@ impl PersistentRegistry {
 ## See Also
 
 - **API Reference:** [rebar-core](api/rebar-core.md) | [rebar-cluster](api/rebar-cluster.md) | [rebar-ffi](api/rebar-ffi.md)
-- **Internals:** [Wire Protocol](internals/wire-protocol.md) | [SWIM Protocol](internals/swim-protocol.md) | [CRDT Registry](internals/crdt-registry.md) | [Supervisor Engine](internals/supervisor-engine.md)
+- **Internals:** [Wire Protocol](internals/wire-protocol.md) | [SWIM Protocol](internals/swim-protocol.md) | [CRDT Registry](internals/crdt-registry.md) | [Supervisor Engine](internals/supervisor-engine.md) | [QUIC Transport](internals/quic-transport.md) | [Distribution Layer](internals/distribution-layer.md) | [Node Drain](internals/node-drain.md)
 - **Guides:** [Getting Started](getting-started.md) | [Architecture](architecture.md)
