@@ -4,13 +4,14 @@ use std::sync::Arc;
 use crate::process::mailbox::{Mailbox, MailboxRx};
 use crate::process::table::{ProcessHandle, ProcessTable};
 use crate::process::{Message, ProcessId, SendError};
+use crate::router::{LocalRouter, MessageRouter};
 
 /// Context provided to each spawned process, giving it access to its own
 /// PID, mailbox, and the ability to send messages to other processes.
 pub struct ProcessContext {
     pid: ProcessId,
     rx: MailboxRx,
-    table: Arc<ProcessTable>,
+    router: Arc<dyn MessageRouter>,
 }
 
 impl ProcessContext {
@@ -36,8 +37,7 @@ impl ProcessContext {
 
     /// Send a message to another process by PID.
     pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
-        let msg = Message::new(self.pid, payload);
-        self.table.send(dest, msg)
+        self.router.route(self.pid, dest, payload)
     }
 }
 
@@ -45,15 +45,37 @@ impl ProcessContext {
 pub struct Runtime {
     node_id: u64,
     table: Arc<ProcessTable>,
+    router: Arc<dyn MessageRouter>,
 }
 
 impl Runtime {
     /// Create a new runtime for the given node ID.
     pub fn new(node_id: u64) -> Self {
+        let table = Arc::new(ProcessTable::new(node_id));
+        let router = Arc::new(LocalRouter::new(Arc::clone(&table)));
         Self {
             node_id,
-            table: Arc::new(ProcessTable::new(node_id)),
+            table,
+            router,
         }
+    }
+
+    /// Create a runtime with a custom message router.
+    pub fn with_router(
+        node_id: u64,
+        table: Arc<ProcessTable>,
+        router: Arc<dyn MessageRouter>,
+    ) -> Self {
+        Self {
+            node_id,
+            table,
+            router,
+        }
+    }
+
+    /// Return a reference to the process table.
+    pub fn table(&self) -> &Arc<ProcessTable> {
+        &self.table
     }
 
     /// Return this runtime's node ID.
@@ -83,7 +105,7 @@ impl Runtime {
         let ctx = ProcessContext {
             pid,
             rx,
-            table: Arc::clone(&self.table),
+            router: Arc::clone(&self.router),
         };
 
         let table = Arc::clone(&self.table);
@@ -108,8 +130,7 @@ impl Runtime {
     /// Uses a synthetic PID of <node_id, 0> as the sender.
     pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         let from = ProcessId::new(self.node_id, 0);
-        let msg = Message::new(from, payload);
-        self.table.send(dest, msg)
+        self.router.route(from, dest, payload)
     }
 }
 
@@ -373,5 +394,60 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(was_err);
+    }
+
+    #[tokio::test]
+    async fn runtime_with_custom_router() {
+        use crate::router::MessageRouter;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct CountingRouter {
+            count: AtomicU64,
+            inner: crate::router::LocalRouter,
+        }
+        impl MessageRouter for CountingRouter {
+            fn route(
+                &self,
+                from: ProcessId,
+                to: ProcessId,
+                payload: rmpv::Value,
+            ) -> Result<(), SendError> {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                self.inner.route(from, to, payload)
+            }
+        }
+
+        let table = Arc::new(crate::process::table::ProcessTable::new(1));
+        let router = Arc::new(CountingRouter {
+            count: AtomicU64::new(0),
+            inner: crate::router::LocalRouter::new(Arc::clone(&table)),
+        });
+        let counter_ref = Arc::clone(&router);
+
+        let rt = Runtime::with_router(1, Arc::clone(&table), router as Arc<dyn MessageRouter>);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let receiver = rt
+            .spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                done_tx
+                    .send(msg.payload().as_str().unwrap().to_string())
+                    .unwrap();
+            })
+            .await;
+
+        rt.spawn(move |ctx| async move {
+            ctx.send(receiver, rmpv::Value::String("routed".into()))
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, "routed");
+        assert!(counter_ref.count.load(Ordering::Relaxed) > 0);
     }
 }
