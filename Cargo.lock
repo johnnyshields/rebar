@@ -623,6 +623,7 @@ version = "0.1.0"
 dependencies = [
  "rebar",
  "rebar-core",
+ "rmpv",
  "tokio",
 ]
 

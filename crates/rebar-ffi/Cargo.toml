@@ -12,4 +12,5 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 rebar = { path = "../rebar" }
 rebar-core = { path = "../rebar-core" }
+rmpv = "1"
 tokio = { version = "1", features = ["full"] }
