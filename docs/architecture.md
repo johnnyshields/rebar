@@ -416,7 +416,7 @@ sequenceDiagram
         CM->>TC: connect(addr)
         TC->>Remote: TCP handshake
         Remote-->>TC: Connected
-        TC-->>CM: Box&lt;dyn TransportConnection&gt;
+        TC-->>CM: Box[dyn TransportConnection]
         CM->>CM: Store connection +<br>clear reconnect attempts
     end
 
