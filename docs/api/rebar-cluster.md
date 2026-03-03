@@ -925,7 +925,7 @@ pub enum GossipUpdate {
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
-| `Alive` | `node_id`, `addr`, `incarnation` | Node is alive at the given incarnation |
+| `Alive` | `node_id`, `addr`, `incarnation`, `cert_hash` | Node is alive at the given incarnation. `cert_hash` is the optional SHA-256 TLS certificate fingerprint. |
 | `Suspect` | `node_id`, `addr`, `incarnation` | Node is suspected at the given incarnation |
 | `Dead` | `node_id`, `addr` | Node has been declared dead |
 | `Leave` | `node_id`, `addr` | Node is voluntarily leaving the cluster |
