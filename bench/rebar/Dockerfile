@@ -1,5 +1,6 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /app
+COPY Cargo.toml /app/Cargo.toml
 COPY crates/ /app/crates/
 COPY bench/rebar/ /app/bench/rebar/
 WORKDIR /app/bench/rebar
