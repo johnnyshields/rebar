@@ -67,114 +67,34 @@ Where `payload` is the output of `Frame::encode()`:
 
 You are free to use a different framing scheme for your transport (e.g., QUIC's native stream framing), as long as complete frames are delivered to `Frame::decode()`.
 
-### Example: QUIC Transport Skeleton
+### Example: QUIC Transport (Built-in)
+
+Rebar ships with a QUIC transport in `rebar_cluster::transport::quic`. It demonstrates the stream-per-frame pattern:
 
 ```rust
-use std::net::SocketAddr;
-use async_trait::async_trait;
-use rebar_cluster::protocol::Frame;
-use rebar_cluster::transport::{TransportConnection, TransportError, TransportListener};
+use rebar_cluster::transport::quic::{QuicTransport, generate_self_signed_cert, QuicTransportConnector};
 
-pub struct QuicConnection {
-    send_stream: quinn::SendStream,
-    recv_stream: quinn::RecvStream,
-}
+// Generate credentials
+let (cert, key, hash) = generate_self_signed_cert();
 
-#[async_trait]
-impl TransportConnection for QuicConnection {
-    async fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
-        let encoded = frame.encode();
-        let len = (encoded.len() as u32).to_be_bytes();
-        self.send_stream.write_all(&len).await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        self.send_stream.write_all(&encoded).await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        Ok(())
-    }
+// Server: bind and listen
+let transport = QuicTransport::new(cert.clone(), key.clone_key());
+let listener = transport.listen("0.0.0.0:4001".parse().unwrap()).await?;
 
-    async fn recv(&mut self) -> Result<Frame, TransportError> {
-        let mut len_buf = [0u8; 4];
-        self.recv_stream.read_exact(&mut len_buf).await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        self.recv_stream.read_exact(&mut buf).await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        let frame = Frame::decode(&buf)?;
-        Ok(frame)
-    }
+// Client: connect with fingerprint verification
+let conn = transport.connect(remote_addr, expected_cert_hash).await?;
 
-    async fn close(&mut self) -> Result<(), TransportError> {
-        self.send_stream.finish()
-            .map_err(|e| TransportError::Io(e.into()))?;
-        Ok(())
-    }
-}
-
-pub struct QuicTransportListener {
-    endpoint: quinn::Endpoint,
-    local_addr: SocketAddr,
-}
-
-#[async_trait]
-impl TransportListener for QuicTransportListener {
-    type Connection = QuicConnection;
-
-    fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-
-    async fn accept(&self) -> Result<Self::Connection, TransportError> {
-        let incoming = self.endpoint.accept().await
-            .ok_or_else(|| TransportError::Io(
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "endpoint closed")
-            ))?;
-        let connection = incoming.await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        let (send_stream, recv_stream) = connection.open_bi().await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        Ok(QuicConnection { send_stream, recv_stream })
-    }
-}
+// ConnectionManager integration
+let connector = QuicTransportConnector::new(cert, key, expected_cert_hash);
+let mut mgr = ConnectionManager::new(Box::new(connector));
 ```
 
-### The TransportConnector Trait
+Key implementation patterns to follow if building a custom transport:
+- **Stream-per-frame:** QUIC opens a new unidirectional stream per `send()`, avoiding head-of-line blocking
+- **Length-prefixed framing:** 4-byte big-endian length prefix before encoded frame bytes
+- **Certificate verification:** Custom `rustls::client::danger::ServerCertVerifier` for fingerprint-based auth
 
-For outbound connections, the `ConnectionManager` uses the `TransportConnector` trait. This is what allows the connection manager to establish connections to discovered nodes using any transport:
-
-```rust
-#[async_trait]
-pub trait TransportConnector: Send + Sync {
-    async fn connect(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn TransportConnection>, TransportError>;
-}
-```
-
-A QUIC connector would look like:
-
-```rust
-pub struct QuicConnector {
-    endpoint: quinn::Endpoint,
-}
-
-#[async_trait]
-impl TransportConnector for QuicConnector {
-    async fn connect(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn TransportConnection>, TransportError> {
-        let connection = self.endpoint.connect(addr, "rebar-node")
-            .map_err(|e| TransportError::Io(e.into()))?
-            .await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        let (send_stream, recv_stream) = connection.open_bi().await
-            .map_err(|e| TransportError::Io(e.into()))?;
-        Ok(Box::new(QuicConnection { send_stream, recv_stream }))
-    }
-}
-```
+See [QUIC Transport Internals](internals/quic-transport.md) for the full implementation walkthrough.
 
 ### Mock Transport for Testing
 
@@ -245,6 +165,31 @@ impl TransportConnector for MockConnector {
 ```
 
 This pattern gives you full control over connection behavior in tests: you can verify what frames were sent, simulate connection failures, and count connection attempts.
+
+## Customizing the Drain Protocol
+
+The `NodeDrain` struct orchestrates graceful shutdown. You can customize timeouts via `DrainConfig`:
+
+```rust
+use rebar_cluster::drain::{NodeDrain, DrainConfig};
+use std::time::Duration;
+
+// Aggressive drain for dev/test
+let config = DrainConfig {
+    announce_timeout: Duration::from_secs(1),
+    drain_timeout: Duration::from_secs(5),
+    shutdown_timeout: Duration::from_secs(2),
+};
+let drain = NodeDrain::new(config);
+
+// Or use individual phases for custom orchestration
+let names_removed = drain.announce(node_id, addr, &mut gossip, &mut registry);
+let (drained, timed_out) = drain.drain_outbound(&mut remote_rx, &mut mgr).await;
+```
+
+The three phases can be run individually if you need custom logic between them (e.g., waiting for a load balancer to deregister the node before draining).
+
+See [Node Drain Internals](internals/node-drain.md) for protocol details.
 
 ---
 
