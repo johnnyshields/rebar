@@ -459,6 +459,70 @@ assert!(!links.is_linked(peer));
 
 ---
 
+## Module: `router`
+
+Message routing abstraction. The `MessageRouter` trait decouples how messages are delivered from the process runtime, allowing transparent local or distributed routing.
+
+---
+
+### `MessageRouter` (trait)
+
+Trait for routing messages between processes. Implementations decide whether to deliver locally or over the network.
+
+**Definition:**
+
+```rust
+pub trait MessageRouter: Send + Sync {
+    fn route(
+        &self,
+        from: ProcessId,
+        to: ProcessId,
+        payload: rmpv::Value,
+    ) -> Result<(), SendError>;
+}
+```
+
+**Bounds:** `Send + Sync` — routers are shared across async tasks via `Arc<dyn MessageRouter>`.
+
+---
+
+### `LocalRouter`
+
+Default router that delivers messages to the local `ProcessTable`. This is the router used by `Runtime::new()`.
+
+**Definition:**
+
+```rust
+pub struct LocalRouter {
+    table: Arc<ProcessTable>,
+}
+```
+
+**Methods:**
+
+- `new(table: Arc<ProcessTable>) -> Self` — Create a local router backed by the given process table.
+
+**Implements:** `MessageRouter` — calls `table.send(to, Message::new(from, payload))`.
+
+**Example:**
+
+```rust
+use std::sync::Arc;
+use rebar_core::process::table::ProcessTable;
+use rebar_core::router::{LocalRouter, MessageRouter};
+use rebar_core::process::ProcessId;
+
+let table = Arc::new(ProcessTable::new(1));
+let router = LocalRouter::new(Arc::clone(&table));
+
+let from = ProcessId::new(1, 0);
+let to = ProcessId::new(1, 1);
+// Routes locally through the ProcessTable
+router.route(from, to, rmpv::Value::String("hello".into()));
+```
+
+---
+
 ## Module: `runtime`
 
 The top-level runtime that owns the process table and provides spawn/send operations.
@@ -475,13 +539,16 @@ The Rebar runtime, responsible for spawning processes and routing messages. Each
 pub struct Runtime {
     node_id: u64,
     table: Arc<ProcessTable>,
+    router: Arc<dyn MessageRouter>,
 }
 ```
 
 #### Methods
 
 - `new(node_id: u64) -> Self` -- Create a new runtime for the given node ID.
+- `with_router(node_id: u64, table: Arc<ProcessTable>, router: Arc<dyn MessageRouter>) -> Self` -- Create a runtime with a custom message router. Used by `DistributedRuntime` to inject a `DistributedRouter`.
 - `node_id(&self) -> u64` -- Return this runtime's node ID.
+- `table(&self) -> &Arc<ProcessTable>` -- Return a reference to the runtime's process table.
 - `async spawn<F, Fut>(&self, handler: F) -> ProcessId` -- Spawn a new process. Returns the new process's PID immediately. The handler runs as an async task and receives a `ProcessContext`. Panics in the handler are caught and do not crash the runtime. The process is automatically removed from the table when the handler completes.
 - `async send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError>` -- Send a message from outside any process context. Uses a synthetic PID of `<node_id, 0>` as the sender.
 
@@ -526,7 +593,7 @@ The execution context provided to each spawned process. Gives access to the proc
 pub struct ProcessContext {
     pid: ProcessId,
     rx: MailboxRx,
-    table: Arc<ProcessTable>,
+    router: Arc<dyn MessageRouter>,
 }
 ```
 
@@ -535,7 +602,7 @@ pub struct ProcessContext {
 - `self_pid(&self) -> ProcessId` -- Return this process's own PID.
 - `async recv(&mut self) -> Option<Message>` -- Receive the next message from this process's mailbox. Returns `None` if the mailbox is closed.
 - `async recv_timeout(&mut self, duration: Duration) -> Option<Message>` -- Receive a message with a timeout. Returns `None` if the timeout expires or the mailbox is closed.
-- `async send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError>` -- Send a message to another process by PID. The message's `from` field is set to this process's PID automatically.
+- `async send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError>` -- Send a message to another process. Delegates to the runtime's `MessageRouter`, which may deliver locally or route to a remote node. The message's `from` field is set to this process's PID automatically.
 
 #### Example
 
