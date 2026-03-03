@@ -48,26 +48,26 @@ run_stack() {
     # Scenario 1: Throughput Ramp
     for C in 1 10 50 100 500 1000; do
         echo "  Throughput c=$C"
-        oha -c "$C" -z 15s --json \
+        oha -c "$C" -z 15s --output-format json \
             -m POST -d '{"n":20}' -T application/json \
             http://localhost:8080/compute > "$results_dir/throughput_c${C}.json" 2>/dev/null || true
     done
 
     # Scenario 2: Latency Profile
     echo "  Latency profile (c=100, 30s)"
-    oha -c 100 -z 30s --json \
+    oha -c 100 -z 30s --output-format json \
         -m POST -d '{"n":30}' -T application/json \
         http://localhost:8080/compute > "$results_dir/latency.json" 2>/dev/null || true
 
     # Scenario 4: Spawn Stress
     echo "  Spawn stress (10k keys)"
-    oha -c 50 -n 10000 --json \
+    oha -c 50 -n 10000 --output-format json \
         -m PUT -d '{"value":"test"}' -T application/json \
         http://localhost:8080/store/key-spawn > "$results_dir/spawn_stress.json" 2>/dev/null || true
 
     # Scenario 5: Cross-Node
     echo "  Cross-node messaging (c=100, 30s)"
-    oha -c 100 -z 30s --json \
+    oha -c 100 -z 30s --output-format json \
         -m POST -d '{"n":10}' -T application/json \
         http://localhost:8080/compute > "$results_dir/cross_node.json" 2>/dev/null || true
 
