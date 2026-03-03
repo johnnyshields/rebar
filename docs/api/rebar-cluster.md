@@ -12,6 +12,7 @@
 - [protocol](#protocol) -- Wire protocol framing and message types
 - [transport](#transport) -- Async transport traits and TCP implementation
 - [router](#module-router) -- Distributed message routing
+- [drain](#module-drain) -- Graceful node drain protocol
 - [swim](#swim) -- SWIM failure detection, membership, gossip
 - [registry](#registry) -- OR-Set CRDT global process name registry
 - [connection](#connection) -- Connection lifecycle and reconnection
@@ -433,6 +434,93 @@ pub fn deliver_inbound_frame(
 ```
 
 Extracts `from_node`, `from_local`, `to_node`, `to_local` from the frame header map, constructs a `Message`, and delivers it to the target process via `table.send()`.
+
+---
+
+## Module: `drain`
+
+Graceful node drain protocol. Orchestrates three-phase shutdown: announce departure, drain in-flight messages, close connections.
+
+---
+
+### `DrainConfig`
+
+Configuration for the three-phase drain protocol.
+
+**Definition:**
+
+```rust
+#[derive(Debug, Clone)]
+pub struct DrainConfig {
+    /// Time to propagate Leave gossip (phase 1).
+    pub announce_timeout: Duration,
+    /// Time to wait for in-flight messages (phase 2).
+    pub drain_timeout: Duration,
+    /// Time for supervisor shutdown (phase 3).
+    pub shutdown_timeout: Duration,
+}
+```
+
+**Defaults:** `announce_timeout: 5s`, `drain_timeout: 30s`, `shutdown_timeout: 10s`
+
+---
+
+### `DrainResult`
+
+Result of a completed drain operation.
+
+**Definition:**
+
+```rust
+#[derive(Debug)]
+pub struct DrainResult {
+    pub processes_stopped: usize,
+    pub messages_drained: usize,
+    pub phase_durations: [Duration; 3],
+    pub timed_out: bool,
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `processes_stopped` | Number of processes stopped during shutdown |
+| `messages_drained` | Number of outbound messages processed during phase 2 |
+| `phase_durations` | Duration of each phase: `[announce, drain, shutdown]` |
+| `timed_out` | Whether any phase hit its timeout |
+
+---
+
+### `NodeDrain`
+
+Orchestrates the three-phase drain protocol.
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `fn new(config: DrainConfig) -> Self` | Create a drain orchestrator with the given config |
+| `announce` | `fn announce(&self, node_id, addr, gossip, registry) -> usize` | Phase 1: broadcast Leave gossip, unregister names. Returns names removed count. |
+| `drain_outbound` | `async fn drain_outbound(&self, remote_rx, connection_manager) -> (usize, bool)` | Phase 2: drain RouterCommand channel. Returns (count, timed_out). |
+| `drain` | `async fn drain(&self, node_id, addr, gossip, registry, remote_rx, connection_manager, process_count) -> DrainResult` | Execute the full three-phase drain protocol. |
+
+**Example:**
+
+```rust
+use rebar_cluster::drain::{NodeDrain, DrainConfig};
+
+let drain = NodeDrain::new(DrainConfig::default());
+
+// Phase 1 only
+let names_removed = drain.announce(node_id, addr, &mut gossip, &mut registry);
+
+// Full drain
+let result = drain.drain(
+    node_id, addr, &mut gossip, &mut registry,
+    &mut remote_rx, &mut connection_manager, process_count,
+).await;
+
+println!("Drained {} messages in {:?}", result.messages_drained, result.phase_durations);
+```
 
 ---
 
