@@ -109,6 +109,46 @@ impl QuicTransport {
 }
 
 // ---------------------------------------------------------------------------
+// QuicTransportConnector
+// ---------------------------------------------------------------------------
+
+/// A [`crate::connection::manager::TransportConnector`] implementation backed
+/// by QUIC.  Each call to `connect` creates a fresh [`QuicTransport`] with
+/// cloned credentials and dials the given address while verifying the remote
+/// certificate fingerprint.
+pub struct QuicTransportConnector {
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+    expected_cert_hash: CertHash,
+}
+
+impl QuicTransportConnector {
+    pub fn new(
+        cert: CertificateDer<'static>,
+        key: PrivateKeyDer<'static>,
+        expected_cert_hash: CertHash,
+    ) -> Self {
+        Self {
+            cert,
+            key,
+            expected_cert_hash,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::connection::manager::TransportConnector for QuicTransportConnector {
+    async fn connect(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<Box<dyn TransportConnection>, TransportError> {
+        let transport = QuicTransport::new(self.cert.clone(), self.key.clone_key());
+        let conn = transport.connect(addr, self.expected_cert_hash).await?;
+        Ok(Box::new(conn))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // QuicListener
 // ---------------------------------------------------------------------------
 
@@ -483,6 +523,49 @@ mod tests {
         let mut ids: Vec<u64> = frames.iter().map(|f| f.request_id).collect();
         ids.sort();
         assert_eq!(ids, (0..10).collect::<Vec<u64>>());
+    }
+
+    #[tokio::test]
+    async fn quic_connector_works_with_connection_manager() {
+        use crate::connection::manager::ConnectionManager;
+        use crate::protocol::{Frame, MsgType};
+        use crate::transport::traits::TransportListener;
+
+        // Server setup
+        let (server_cert, server_key, server_hash) = generate_self_signed_cert();
+        let server = QuicTransport::new(server_cert.clone(), server_key);
+        let listener = server.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let server_addr = listener.local_addr();
+
+        // Client connector
+        let (client_cert, client_key, _) = generate_self_signed_cert();
+        let connector = QuicTransportConnector::new(client_cert, client_key, server_hash);
+        let mut mgr = ConnectionManager::new(Box::new(connector));
+
+        // Server accepts in background, receives frame
+        let server_handle = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.recv().await.unwrap()
+        });
+
+        // Client connects via ConnectionManager and routes a frame
+        mgr.connect(1, server_addr).await.unwrap();
+        assert!(mgr.is_connected(1));
+
+        let frame = Frame {
+            version: 1,
+            msg_type: MsgType::Heartbeat,
+            request_id: 0,
+            header: rmpv::Value::Nil,
+            payload: rmpv::Value::Nil,
+        };
+        mgr.route(1, &frame).await.unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.msg_type, MsgType::Heartbeat);
     }
 
     #[tokio::test]
