@@ -4,8 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::events::{EventBus, LifecycleEvent};
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
 use crate::supervisor::spec::{ChildSpec, RestartStrategy, ShutdownStrategy, SupervisorSpec};
@@ -34,6 +36,14 @@ impl ChildEntry {
     }
 }
 
+/// Snapshot of a single supervised child.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChildInfo {
+    pub id: String,
+    pub pid: Option<ProcessId>,
+    pub restart_count: u32,
+}
+
 /// Internal per-child tracking used by the running supervisor.
 struct ChildState {
     spec: ChildSpec,
@@ -41,6 +51,7 @@ struct ChildState {
     pid: Option<ProcessId>,
     /// Sender to signal the child to shut down (dropped = shutdown signal).
     shutdown_tx: Option<oneshot::Sender<()>>,
+    restart_count: u32,
 }
 
 /// Messages the supervisor loop processes.
@@ -55,6 +66,10 @@ enum SupervisorMsg {
     AddChild {
         entry: ChildEntry,
         reply: oneshot::Sender<Result<ProcessId, String>>,
+    },
+    /// Query the list of children.
+    WhichChildren {
+        reply: oneshot::Sender<Vec<ChildInfo>>,
     },
     /// Shut down the supervisor.
     Shutdown,
@@ -85,6 +100,15 @@ impl SupervisorHandle {
         reply_rx.await.map_err(|_| "supervisor gone".to_string())?
     }
 
+    /// Query the list of children and their current state.
+    pub async fn which_children(&self) -> Result<Vec<ChildInfo>, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.msg_tx
+            .send(SupervisorMsg::WhichChildren { reply: reply_tx })
+            .map_err(|_| "supervisor gone".to_string())?;
+        reply_rx.await.map_err(|_| "supervisor gone".to_string())
+    }
+
     /// Request the supervisor to shut down.
     pub fn shutdown(&self) {
         let _ = self.msg_tx.send(SupervisorMsg::Shutdown);
@@ -101,14 +125,12 @@ pub async fn start_supervisor(
 ) -> SupervisorHandle {
     let (msg_tx, msg_rx) = mpsc::unbounded_channel();
 
-    // We need the supervisor PID. Spawn the supervisor as a tokio task
-    // (not via Runtime::spawn since that expects ProcessContext-based handler).
-    // Instead, we'll allocate a PID for it conceptually.
-    // Actually let's use Runtime::spawn to get a real PID.
     let msg_tx_clone = msg_tx.clone();
+    let event_bus = runtime.event_bus().cloned();
     let pid = runtime
-        .spawn(move |_ctx| async move {
-            supervisor_loop(spec, children, msg_rx, msg_tx_clone).await;
+        .spawn_supervisor(move |ctx| async move {
+            let sup_pid = ctx.self_pid();
+            supervisor_loop(spec, children, msg_rx, msg_tx_clone, event_bus, sup_pid).await;
         })
         .await;
 
@@ -121,7 +143,10 @@ async fn supervisor_loop(
     children: Vec<ChildEntry>,
     mut msg_rx: mpsc::UnboundedReceiver<SupervisorMsg>,
     msg_tx: mpsc::UnboundedSender<SupervisorMsg>,
+    event_bus: Option<EventBus>,
+    sup_pid: ProcessId,
 ) {
+
     let mut state = SupervisorState {
         strategy: spec.strategy,
         max_restarts: spec.max_restarts,
@@ -130,79 +155,162 @@ async fn supervisor_loop(
         restart_times: VecDeque::new(),
     };
 
-    // Start children in order
     for entry in children {
         let child_state = ChildState {
             spec: entry.spec,
             factory: entry.factory,
             pid: None,
             shutdown_tx: None,
+            restart_count: 0,
         };
         state.children.push(child_state);
+    }
+
+    // Emit SupervisorStarted
+    if let Some(bus) = &event_bus {
+        let child_ids: Vec<String> = state.children.iter().map(|c| c.spec.id.clone()).collect();
+        bus.emit(LifecycleEvent::SupervisorStarted {
+            pid: sup_pid,
+            strategy: state.strategy,
+            child_ids,
+            timestamp: LifecycleEvent::now(),
+        });
     }
 
     // Start all children in order
     for i in 0..state.children.len() {
         start_child(&mut state.children[i], i, &msg_tx);
+        if let Some(bus) = &event_bus {
+            if let Some(child_pid) = state.children[i].pid {
+                bus.emit(LifecycleEvent::ChildStarted {
+                    supervisor_pid: sup_pid,
+                    child_pid,
+                    child_id: state.children[i].spec.id.clone(),
+                    timestamp: LifecycleEvent::now(),
+                });
+            }
+        }
     }
 
-    // Main event loop
     loop {
         match msg_rx.recv().await {
             Some(SupervisorMsg::ChildExited { index, pid, reason }) => {
-                // Verify this is still the current PID for that index
                 if index >= state.children.len() {
                     continue;
                 }
+                // TLA+: `SupervisorProcessesStaleExit` — PID mismatch guard.
+                // If child_pid[index] != pid, this exit is stale (child was
+                // already restarted with a new PID). The `StaleExitSafety`
+                // action property verifies this branch is a no-op.
                 if state.children[index].pid != Some(pid) {
                     continue;
+                }
+
+                let child_id = state.children[index].spec.id.clone();
+
+                if let Some(bus) = &event_bus {
+                    bus.emit(LifecycleEvent::ChildExited {
+                        supervisor_pid: sup_pid,
+                        child_pid: pid,
+                        child_id: child_id.clone(),
+                        reason: reason.clone(),
+                        timestamp: LifecycleEvent::now(),
+                    });
                 }
 
                 state.children[index].pid = None;
                 state.children[index].shutdown_tx = None;
 
                 let should_restart = state.children[index].spec.restart.should_restart(&reason);
-
                 if !should_restart {
                     continue;
                 }
 
-                // Check restart limits
+                // TLA+: `SupervisorEscalates` — restart limit exceeded
                 if !state.check_restart_limit() {
-                    // Exceeded max restarts, shut down everything
+                    if let Some(bus) = &event_bus {
+                        bus.emit(LifecycleEvent::SupervisorMaxRestartsExceeded {
+                            pid: sup_pid,
+                            timestamp: LifecycleEvent::now(),
+                        });
+                    }
                     shutdown_all_children(&mut state.children).await;
                     break;
                 }
 
-                // Apply restart strategy
+                // TLA+: `SupervisorProcessesOneForOne` / `OneForAll` / `RestForOne`
                 match state.strategy {
+                    // TLA+: `SupervisorProcessesOneForOne` — restart only the failed child
                     RestartStrategy::OneForOne => {
+                        let old_pid = pid;
                         start_child(&mut state.children[index], index, &msg_tx);
+                        state.children[index].restart_count += 1;
+                        if let Some(bus) = &event_bus {
+                            if let Some(new_pid) = state.children[index].pid {
+                                bus.emit(LifecycleEvent::ChildRestarted {
+                                    supervisor_pid: sup_pid,
+                                    old_pid,
+                                    new_pid,
+                                    child_id,
+                                    restart_count: state.children[index].restart_count,
+                                    timestamp: LifecycleEvent::now(),
+                                });
+                            }
+                        }
                     }
+                    // TLA+: `SupervisorProcessesOneForAll` — stop all others,
+                    // then restart ALL children with fresh PIDs. Stale exits
+                    // from stopped children are handled by the PID mismatch guard.
                     RestartStrategy::OneForAll => {
-                        // Stop all children in reverse order (except the one that already exited)
                         let len = state.children.len();
                         for i in (0..len).rev() {
                             if i != index && state.children[i].pid.is_some() {
                                 stop_child(&mut state.children[i]).await;
                             }
                         }
-                        // Restart all in order
                         for i in 0..len {
+                            let old_pid = state.children[i].pid;
                             start_child(&mut state.children[i], i, &msg_tx);
+                            state.children[i].restart_count += 1;
+                            if let Some(bus) = &event_bus {
+                                if let Some(new_pid) = state.children[i].pid {
+                                    bus.emit(LifecycleEvent::ChildRestarted {
+                                        supervisor_pid: sup_pid,
+                                        old_pid: old_pid.unwrap_or(new_pid),
+                                        new_pid,
+                                        child_id: state.children[i].spec.id.clone(),
+                                        restart_count: state.children[i].restart_count,
+                                        timestamp: LifecycleEvent::now(),
+                                    });
+                                }
+                            }
                         }
                     }
+                    // TLA+: `SupervisorProcessesRestForOne` — stop successors
+                    // (index > failed), then restart failed + successors.
                     RestartStrategy::RestForOne => {
-                        // Stop children after the failed one, in reverse order
                         let len = state.children.len();
                         for i in (index + 1..len).rev() {
                             if state.children[i].pid.is_some() {
                                 stop_child(&mut state.children[i]).await;
                             }
                         }
-                        // Restart failed child and all subsequent
                         for i in index..len {
+                            let old_pid = state.children[i].pid;
                             start_child(&mut state.children[i], i, &msg_tx);
+                            state.children[i].restart_count += 1;
+                            if let Some(bus) = &event_bus {
+                                if let Some(new_pid) = state.children[i].pid {
+                                    bus.emit(LifecycleEvent::ChildRestarted {
+                                        supervisor_pid: sup_pid,
+                                        old_pid: old_pid.unwrap_or(new_pid),
+                                        new_pid,
+                                        child_id: state.children[i].spec.id.clone(),
+                                        restart_count: state.children[i].restart_count,
+                                        timestamp: LifecycleEvent::now(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -214,18 +322,37 @@ async fn supervisor_loop(
                     factory: entry.factory,
                     pid: None,
                     shutdown_tx: None,
+                    restart_count: 0,
                 };
                 start_child(&mut child_state, idx, &msg_tx);
                 let pid = child_state.pid.unwrap();
+                if let Some(bus) = &event_bus {
+                    bus.emit(LifecycleEvent::ChildStarted {
+                        supervisor_pid: sup_pid,
+                        child_pid: pid,
+                        child_id: child_state.spec.id.clone(),
+                        timestamp: LifecycleEvent::now(),
+                    });
+                }
                 state.children.push(child_state);
                 let _ = reply.send(Ok(pid));
             }
-            Some(SupervisorMsg::Shutdown) => {
-                shutdown_all_children(&mut state.children).await;
-                break;
+            Some(SupervisorMsg::WhichChildren { reply }) => {
+                let infos: Vec<ChildInfo> = state
+                    .children
+                    .iter()
+                    .map(|c| ChildInfo {
+                        id: c.spec.id.clone(),
+                        pid: c.pid,
+                        restart_count: c.restart_count,
+                    })
+                    .collect();
+                let _ = reply.send(infos);
             }
-            None => {
-                // All senders dropped, shut down
+            // TLA+: `SupervisorShutdown` — sets sup_state to "shutdown",
+            // all children to "stopped". `NoRestartAfterShutdown` verifies
+            // no children remain running after this transition.
+            Some(SupervisorMsg::Shutdown) | None => {
                 shutdown_all_children(&mut state.children).await;
                 break;
             }
@@ -243,6 +370,10 @@ struct SupervisorState {
 
 impl SupervisorState {
     /// Check if we've exceeded the restart limit. Returns true if restart is allowed.
+    ///
+    /// TLA+: `UnderRestartLimit` — uses `<=` (not `<`) matching the TLA+ spec's
+    /// `restart_count <= MaxRestarts`. The `RestartLimitRespected` invariant
+    /// verifies this never exceeds MaxRestarts unless supervisor has shut down.
     fn check_restart_limit(&mut self) -> bool {
         if self.max_restarts == 0 {
             return false;
@@ -269,6 +400,11 @@ impl SupervisorState {
 }
 
 /// Start (or restart) a child, spawning it as a tokio task.
+///
+/// TLA+: PID assignment uses a monotonic counter (`CHILD_PID_COUNTER`),
+/// mirroring `next_pid` in `RebarSupervisor.tla`. The `PIDMonotonicity`
+/// invariant verifies every live PID < next_pid, and `NoPIDSharing`
+/// verifies no two children share the same PID.
 fn start_child(
     child: &mut ChildState,
     index: usize,
