@@ -23,6 +23,13 @@ export class NotFoundError extends RebarError {
 }
 
 /** Raised when a name is not valid UTF-8. */
+export class TimeoutError extends RebarError {
+  constructor() {
+    super(-5, "recv timed out");
+    this.name = "TimeoutError";
+  }
+}
+
 export class InvalidNameError extends RebarError {
   constructor() {
     super(-4, "name is not valid UTF-8");
@@ -40,6 +47,8 @@ export function checkError(rc: number): void {
       throw new SendError();
     case -3:
       throw new NotFoundError();
+    case -5:
+      throw new TimeoutError();
     case -4:
       throw new InvalidNameError();
     default:

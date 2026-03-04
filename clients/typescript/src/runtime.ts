@@ -20,6 +20,11 @@ export class Context {
     this._runtime.send(dest, data);
   }
 
+  /** Receive a message from this process's mailbox. */
+  recv(timeoutMs: number | bigint = -1n): Uint8Array | null {
+    return this._runtime.recv(this._pid, timeoutMs);
+  }
+
   /** Register a name for a PID. */
   register(name: string, pid: Pid): void {
     this._runtime.register(name, pid);
@@ -89,6 +94,45 @@ export class Runtime implements Disposable {
     } finally {
       lib.symbols.rebar_msg_free(msg);
     }
+  }
+
+  /** Receive a message from a process's mailbox.
+   * Returns null if timed out. */
+  recv(pid: Pid, timeoutMs: number | bigint = -1n): Uint8Array | null {
+    const pidBuf = new BigUint64Array([BigInt(pid.nodeId), BigInt(pid.localId)]);
+    const msgOutBuf = new BigUint64Array(1); // pointer-sized buffer
+    const rc = lib.symbols.rebar_recv(
+      this.ptr,
+      pidBuf as unknown as BufferSource,
+      msgOutBuf as unknown as BufferSource,
+      BigInt(timeoutMs),
+    );
+    if (rc === -5) {
+      return null; // timeout
+    }
+    checkError(rc);
+    const msgPtr = Deno.UnsafePointer.create(msgOutBuf[0]);
+    try {
+      const dataPtr = lib.symbols.rebar_msg_data(msgPtr);
+      const length = lib.symbols.rebar_msg_len(msgPtr);
+      if (dataPtr === null || length === 0n) {
+        return new Uint8Array(0);
+      }
+      const view = new Deno.UnsafePointerView(dataPtr);
+      return new Uint8Array(view.getArrayBuffer(Number(length)));
+    } finally {
+      lib.symbols.rebar_msg_free(msgPtr);
+    }
+  }
+
+  /** Stop a process and remove it from the process table. */
+  stopProcess(pid: Pid): void {
+    const pidBuf = new BigUint64Array([BigInt(pid.nodeId), BigInt(pid.localId)]);
+    const rc = lib.symbols.rebar_stop_process(
+      this.ptr,
+      pidBuf as unknown as BufferSource,
+    );
+    checkError(rc);
   }
 
   /** Register a name for a PID. */
@@ -161,8 +205,6 @@ export class Runtime implements Disposable {
       } as const,
       // deno-lint-ignore no-explicit-any
       (pidStruct: any) => {
-        // Deno passes struct parameters as a Uint8Array containing the raw bytes.
-        // We need to reinterpret as BigUint64Array to read the two u64 fields.
         let nodeId: bigint;
         let localId: bigint;
         if (pidStruct instanceof BigUint64Array) {
@@ -173,13 +215,27 @@ export class Runtime implements Disposable {
           nodeId = view.getBigUint64(0, true);
           localId = view.getBigUint64(8, true);
         } else {
-          // Fallback: treat as BigUint64Array-like
           nodeId = BigInt(pidStruct[0]);
           localId = BigInt(pidStruct[1]);
         }
         const pid = new Pid(nodeId, localId);
         const ctx = new Context(pid, runtimeRef);
+
+        // Init callback with null message.
         actor.handleMessage(ctx, null);
+
+        // Start async message polling loop.
+        (async () => {
+          while (true) {
+            const data = runtimeRef.recv(pid, 100n);
+            if (data === null) {
+              // Timeout - yield and retry
+              await new Promise((r) => setTimeout(r, 0));
+              continue;
+            }
+            actor.handleMessage(ctx, data);
+          }
+        })();
       },
     );
     this.callbacks.push(callback);

@@ -55,6 +55,14 @@ export const lib = Deno.dlopen(libPath, {
     parameters: ["pointer", "buffer", "usize", "pointer"],
     result: "i32",
   },
+  rebar_recv: {
+    parameters: ["pointer", { struct: ["u64", "u64"] }, "buffer", "i64"],
+    result: "i32",
+  },
+  rebar_stop_process: {
+    parameters: ["pointer", { struct: ["u64", "u64"] }],
+    result: "i32",
+  },
   rebar_unregister: {
     parameters: ["pointer", "buffer", "usize"],
     result: "i32",

@@ -23,6 +23,13 @@ class NotFoundError(RebarError):
         super().__init__(-3, "name not found in registry")
 
 
+class TimeoutError(RebarError):
+    """Raised when a recv operation times out."""
+
+    def __init__(self):
+        super().__init__(-5, "recv timed out")
+
+
 class InvalidNameError(RebarError):
     """Raised when a name is not valid UTF-8."""
 
@@ -40,6 +47,8 @@ def check_error(rc: int) -> None:
         raise SendError()
     if rc == -3:
         raise NotFoundError()
+    if rc == -5:
+        raise TimeoutError()
     if rc == -4:
         raise InvalidNameError()
     raise RebarError(rc, "unknown error")

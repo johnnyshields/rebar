@@ -97,6 +97,27 @@ func (r *Runtime) Unregister(name string) error {
 	return checkError(rc)
 }
 
+// Recv receives a message from a process's mailbox.
+// timeoutMs: 0 = non-blocking, >0 = timeout in ms, <0 = block forever.
+func (r *Runtime) Recv(pid Pid, timeoutMs int64) (*Msg, error) {
+	var msgOut *C.rebar_msg_t
+	rc := C.rebar_recv(r.ptr, pidToC(pid), &msgOut, C.int64_t(timeoutMs))
+	if err := checkError(rc); err != nil {
+		return nil, err
+	}
+	defer C.rebar_msg_free(msgOut)
+	data := C.rebar_msg_data(msgOut)
+	length := C.rebar_msg_len(msgOut)
+	goBytes := C.GoBytes(unsafe.Pointer(data), C.int(length))
+	return &Msg{Data: goBytes}, nil
+}
+
+// StopProcess stops a process and removes it from the process table.
+func (r *Runtime) StopProcess(pid Pid) error {
+	rc := C.rebar_stop_process(r.ptr, pidToC(pid))
+	return checkError(rc)
+}
+
 // SpawnActor spawns a new process backed by the given Actor.
 // The actor's HandleMessage is called with a nil message on startup
 // (as a lifecycle hook), and the process PID is returned.

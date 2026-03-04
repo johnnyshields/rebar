@@ -96,3 +96,12 @@ _lib.rebar_unregister.argtypes = [
     ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t
 ]
 _lib.rebar_unregister.restype = ctypes.c_int32
+
+# --- Recv / Stop API ---
+_lib.rebar_recv.argtypes = [
+    ctypes.c_void_p, RebarPid, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int64
+]
+_lib.rebar_recv.restype = ctypes.c_int32
+
+_lib.rebar_stop_process.argtypes = [ctypes.c_void_p, RebarPid]
+_lib.rebar_stop_process.restype = ctypes.c_int32

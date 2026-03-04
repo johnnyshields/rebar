@@ -11,6 +11,7 @@ const (
 	errSendFailed  = -2
 	errNotFound    = -3
 	errInvalidName = -4
+	errTimeout    = -5
 )
 
 // RebarError represents an error returned by the Rebar FFI.
@@ -34,6 +35,11 @@ type NotFoundError struct {
 }
 
 // InvalidNameError is returned when a name is not valid UTF-8.
+// TimeoutError is returned when a recv operation times out.
+type TimeoutError struct {
+	RebarError
+}
+
 type InvalidNameError struct {
 	RebarError
 }
@@ -48,6 +54,8 @@ func checkError(rc C.int32_t) error {
 		return &SendError{RebarError{Code: errSendFailed, Message: "failed to deliver message"}}
 	case errNotFound:
 		return &NotFoundError{RebarError{Code: errNotFound, Message: "name not found in registry"}}
+	case errTimeout:
+		return &TimeoutError{RebarError{Code: errTimeout, Message: "recv timed out"}}
 	case errInvalidName:
 		return &InvalidNameError{RebarError{Code: errInvalidName, Message: "name is not valid UTF-8"}}
 	default:

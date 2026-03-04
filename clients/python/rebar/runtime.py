@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import ctypes
-from typing import TYPE_CHECKING
+import threading
+from typing import TYPE_CHECKING, Optional
 
 from . import _ffi
-from .errors import check_error
+from .errors import check_error, TimeoutError
 from .types import Pid
 
 if TYPE_CHECKING:
@@ -28,6 +29,10 @@ class Context:
         """Send a message to another process."""
         self._runtime.send(dest, data)
 
+    def recv(self, timeout_ms: int = -1) -> Optional[bytes]:
+        """Receive a message from this process's mailbox."""
+        return self._runtime.recv(self._pid, timeout_ms)
+
     def register(self, name: str, pid: Pid) -> None:
         """Register a name for a PID."""
         self._runtime.register(name, pid)
@@ -39,10 +44,6 @@ class Context:
     def send_named(self, name: str, data: bytes) -> None:
         """Send a message to a named process."""
         self._runtime.send_named(name, data)
-
-    def unregister(self, name: str) -> None:
-        """Unregister a name."""
-        self._runtime.unregister(name)
 
 
 class Runtime:
@@ -87,6 +88,35 @@ class Runtime:
         finally:
             _ffi._lib.rebar_msg_free(msg)
 
+    def recv(self, pid: Pid, timeout_ms: int = -1) -> Optional[bytes]:
+        """Receive a message from a process's mailbox.
+
+        Returns the message bytes, or None if timed out.
+        """
+        msg_out = ctypes.c_void_p(0)
+        rc = _ffi._lib.rebar_recv(
+            self._ptr,
+            _ffi.RebarPid(pid.node_id, pid.local_id),
+            ctypes.byref(msg_out),
+            timeout_ms,
+        )
+        if rc == -5:  # REBAR_ERR_TIMEOUT
+            return None
+        check_error(rc)
+        try:
+            data_ptr = _ffi._lib.rebar_msg_data(msg_out)
+            length = _ffi._lib.rebar_msg_len(msg_out)
+            return bytes(data_ptr[:length])
+        finally:
+            _ffi._lib.rebar_msg_free(msg_out)
+
+    def stop_process(self, pid: Pid) -> None:
+        """Stop a process and remove it from the process table."""
+        rc = _ffi._lib.rebar_stop_process(
+            self._ptr, _ffi.RebarPid(pid.node_id, pid.local_id)
+        )
+        check_error(rc)
+
     def register(self, name: str, pid: Pid) -> None:
         """Register a name for a PID."""
         name_bytes = name.encode("utf-8")
@@ -118,18 +148,11 @@ class Runtime:
         finally:
             _ffi._lib.rebar_msg_free(msg)
 
-    def unregister(self, name: str) -> None:
-        """Unregister a name."""
-        name_bytes = name.encode("utf-8")
-        rc = _ffi._lib.rebar_unregister(
-            self._ptr, name_bytes, len(name_bytes),
-        )
-        check_error(rc)
-
     def spawn_actor(self, actor: Actor) -> Pid:
         """Spawn a new process backed by the given Actor.
 
-        The actor's handle_message is called with a None message on startup.
+        The actor's handle_message is called with a None message on startup,
+        then a background thread polls for messages and dispatches them.
         """
         pid_out = _ffi.RebarPid()
         runtime_ref = self
@@ -138,7 +161,19 @@ class Runtime:
         def callback(ffi_pid: _ffi.RebarPid) -> None:
             pid = Pid(node_id=ffi_pid.node_id, local_id=ffi_pid.local_id)
             ctx = Context(pid, runtime_ref)
+            # Init callback with None message
             actor.handle_message(ctx, None)
+
+            # Start background message loop
+            def message_loop() -> None:
+                while True:
+                    data = runtime_ref.recv(pid, timeout_ms=100)
+                    if data is None:
+                        continue
+                    actor.handle_message(ctx, data)
+
+            t = threading.Thread(target=message_loop, daemon=True)
+            t.start()
 
         # Keep reference to prevent GC of the callback
         self._callbacks.append(callback)
