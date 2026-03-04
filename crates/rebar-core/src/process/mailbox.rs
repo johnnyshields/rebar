@@ -89,19 +89,7 @@ impl MailboxTx {
     /// full, returns `SendError::MailboxFull`; if the receiver is dropped,
     /// returns `SendError::ProcessDead`.
     pub fn send(&self, msg: Message) -> Result<(), SendError> {
-        match &self.inner {
-            TxInner::Unbounded(tx) => {
-                let from = msg.from();
-                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
-            }
-            TxInner::Bounded(tx) => {
-                let from = msg.from();
-                tx.try_send(msg).map_err(|e| match e {
-                    mpsc::error::TrySendError::Full(_) => SendError::MailboxFull(from),
-                    mpsc::error::TrySendError::Closed(_) => SendError::ProcessDead(from),
-                })
-            }
-        }
+        self.try_send(msg)
     }
 
     /// Send a message, waiting for space if the mailbox is bounded and full.
@@ -110,10 +98,7 @@ impl MailboxTx {
     /// mailbox is at capacity, this method awaits until space is available.
     pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
         match &self.inner {
-            TxInner::Unbounded(tx) => {
-                let from = msg.from();
-                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
-            }
+            TxInner::Unbounded(tx) => Self::send_unbounded(tx, msg),
             TxInner::Bounded(tx) => {
                 let from = msg.from();
                 tx.send(msg).await.map_err(|_| SendError::ProcessDead(from))
@@ -128,10 +113,7 @@ impl MailboxTx {
     /// is at capacity.
     pub fn try_send(&self, msg: Message) -> Result<(), SendError> {
         match &self.inner {
-            TxInner::Unbounded(tx) => {
-                let from = msg.from();
-                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
-            }
+            TxInner::Unbounded(tx) => Self::send_unbounded(tx, msg),
             TxInner::Bounded(tx) => {
                 let from = msg.from();
                 tx.try_send(msg).map_err(|e| match e {
@@ -140,6 +122,14 @@ impl MailboxTx {
                 })
             }
         }
+    }
+
+    /// Send a message on an unbounded channel.
+    ///
+    /// Returns `SendError::ProcessDead` if the receiver has been dropped.
+    fn send_unbounded(tx: &mpsc::UnboundedSender<Message>, msg: Message) -> Result<(), SendError> {
+        let from = msg.from();
+        tx.send(msg).map_err(|_| SendError::ProcessDead(from))
     }
 }
 
@@ -353,6 +343,26 @@ mod tests {
         // Verify the async-sent message is in the mailbox
         let received = rx.recv().await.unwrap();
         assert_eq!(received.payload().as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn send_async_to_closed_bounded_returns_process_dead() {
+        let (tx, rx) = Mailbox::bounded(10);
+        drop(rx);
+        let pid = ProcessId::new(0, 1);
+        let msg = Message::new(pid, rmpv::Value::from(1));
+        let result = tx.send_async(msg).await;
+        assert!(matches!(result, Err(SendError::ProcessDead(_))));
+    }
+
+    #[tokio::test]
+    async fn send_async_to_closed_unbounded_returns_process_dead() {
+        let (tx, rx) = Mailbox::unbounded();
+        drop(rx);
+        let pid = ProcessId::new(0, 1);
+        let msg = Message::new(pid, rmpv::Value::from(1));
+        let result = tx.send_async(msg).await;
+        assert!(matches!(result, Err(SendError::ProcessDead(_))));
     }
 
     #[tokio::test]

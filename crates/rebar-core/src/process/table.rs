@@ -24,6 +24,11 @@ impl ProcessHandle {
     pub fn send(&self, msg: Message) -> Result<(), SendError> {
         self.tx.send(msg)
     }
+
+    /// Send a message, waiting for space if the mailbox is bounded and full.
+    pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
+        self.tx.send_async(msg).await
+    }
 }
 
 /// Table of all processes on this node.
@@ -84,6 +89,15 @@ impl ProcessTable {
             Some(handle) => handle.send(msg),
             None => Err(SendError::ProcessDead(pid)),
         }
+    }
+
+    /// Send a message to a process by its PID, waiting for space if bounded.
+    ///
+    /// Returns `SendError::ProcessDead` if the PID is not in the table.
+    pub async fn send_async(&self, pid: ProcessId, msg: Message) -> Result<(), SendError> {
+        let handle = self.processes.get(&pid)
+            .ok_or(SendError::ProcessDead(pid))?;
+        handle.send_async(msg).await
     }
 
     /// Return the number of processes currently in the table.
@@ -219,6 +233,28 @@ mod tests {
         for h in handles {
             assert!(h.join().unwrap().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn send_async_through_table() {
+        let table = ProcessTable::new(1);
+        let pid = table.allocate_pid();
+        let (tx, mut rx) = crate::process::mailbox::Mailbox::bounded(1);
+        table.insert(pid, ProcessHandle::new(tx));
+
+        let msg = crate::process::Message::new(ProcessId::new(1, 0), rmpv::Value::from(99));
+        table.send_async(pid, msg).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(99));
+    }
+
+    #[tokio::test]
+    async fn send_async_to_missing_pid_returns_error() {
+        let table = ProcessTable::new(1);
+        let msg = crate::process::Message::new(ProcessId::new(1, 0), rmpv::Value::Nil);
+        let result = table.send_async(ProcessId::new(1, 999), msg).await;
+        assert!(matches!(result, Err(SendError::ProcessDead(_))));
     }
 
     #[test]
