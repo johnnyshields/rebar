@@ -74,7 +74,8 @@ impl ExitReason {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SendError {
     #[error("process dead: {0}")]
     ProcessDead(ProcessId),
@@ -83,7 +84,7 @@ pub enum SendError {
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
     #[error("malformed frame: {0}")]
-    MalformedFrame(String),
+    MalformedFrame(&'static str),
 }
 
 #[cfg(test)]

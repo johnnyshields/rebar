@@ -83,32 +83,45 @@ pub fn encode_send_frame(from: ProcessId, to: ProcessId, payload: rmpv::Value) -
     }
 }
 
+/// Extract a u64 value from a msgpack Value, returning a SendError if it is not a u64.
+fn require_u64(value: &rmpv::Value, field: &'static str) -> Result<u64, SendError> {
+    value.as_u64().ok_or_else(|| SendError::MalformedFrame(field))
+}
+
 /// Deliver an inbound frame from the network to a local process.
 ///
 /// Extracts addressing information from the frame header and delivers the
 /// payload to the target process's mailbox via the process table.
 pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), SendError> {
     let header = frame.header.as_map()
-        .ok_or_else(|| SendError::MalformedFrame("frame header must be a Map".into()))?;
+        .ok_or_else(|| SendError::MalformedFrame("frame header must be a Map"))?;
 
     let mut from_node: u64 = 0;
     let mut from_local: u64 = 0;
     let mut to_node: u64 = 0;
     let mut to_local: u64 = 0;
+    let mut has_to_node = false;
+    let mut has_to_local = false;
 
     for (key, value) in header {
         let key_str = key.as_str().unwrap_or("");
         match key_str {
-            "from_node" => from_node = value.as_u64()
-                .ok_or_else(|| SendError::MalformedFrame("from_node must be u64".into()))?,
-            "from_local" => from_local = value.as_u64()
-                .ok_or_else(|| SendError::MalformedFrame("from_local must be u64".into()))?,
-            "to_node" => to_node = value.as_u64()
-                .ok_or_else(|| SendError::MalformedFrame("to_node must be u64".into()))?,
-            "to_local" => to_local = value.as_u64()
-                .ok_or_else(|| SendError::MalformedFrame("to_local must be u64".into()))?,
+            "from_node" => from_node = require_u64(value, "from_node must be u64")?,
+            "from_local" => from_local = require_u64(value, "from_local must be u64")?,
+            "to_node" => {
+                to_node = require_u64(value, "to_node must be u64")?;
+                has_to_node = true;
+            }
+            "to_local" => {
+                to_local = require_u64(value, "to_local must be u64")?;
+                has_to_local = true;
+            }
             _ => {}
         }
+    }
+
+    if !has_to_node || !has_to_local {
+        return Err(SendError::MalformedFrame("missing required addressing fields: to_node and to_local"));
     }
 
     let from = ProcessId::new(from_node, from_local);
@@ -176,7 +189,7 @@ mod tests {
         router.route(from, remote_pid, rmpv::Value::Nil).unwrap(); // fills channel
 
         let result = router.route(from, remote_pid, rmpv::Value::Nil);
-        assert!(matches!(result, Err(SendError::NodeUnreachable(2))));
+        assert_eq!(result, Err(SendError::NodeUnreachable(2)));
     }
 
     #[test]
@@ -224,7 +237,7 @@ mod tests {
             payload: rmpv::Value::Nil,
         };
         let result = deliver_inbound_frame(&table, &frame);
-        assert!(matches!(result, Err(SendError::MalformedFrame(_))));
+        assert_eq!(result, Err(SendError::MalformedFrame("frame header must be a Map")));
     }
 
     #[test]
@@ -241,11 +254,11 @@ mod tests {
             payload: rmpv::Value::Nil,
         };
         let result = deliver_inbound_frame(&table, &frame);
-        assert!(matches!(result, Err(SendError::MalformedFrame(_))));
+        assert_eq!(result, Err(SendError::MalformedFrame("from_node must be u64")));
     }
 
     #[test]
-    fn missing_fields_default_to_zero() {
+    fn missing_fields_returns_malformed_frame() {
         let table = ProcessTable::new(1);
         let frame = Frame {
             version: 1,
@@ -254,10 +267,12 @@ mod tests {
             header: rmpv::Value::Map(vec![]),
             payload: rmpv::Value::Nil,
         };
-        // Empty map should not error - missing fields default to 0.
-        // It will fail with ProcessDead since pid <0.0> doesn't exist,
-        // but it should NOT be a MalformedFrame error.
+        // Empty map is missing required addressing fields (to_node, to_local),
+        // so it should return MalformedFrame.
         let result = deliver_inbound_frame(&table, &frame);
-        assert!(!matches!(result, Err(SendError::MalformedFrame(_))));
+        assert_eq!(
+            result,
+            Err(SendError::MalformedFrame("missing required addressing fields: to_node and to_local"))
+        );
     }
 }
