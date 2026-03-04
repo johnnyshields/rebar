@@ -335,7 +335,7 @@ async fn stop_child(child: &mut ChildState) {
 }
 
 /// Shut down all children in reverse order.
-async fn shutdown_all_children(children: &mut Vec<ChildState>) {
+async fn shutdown_all_children(children: &mut [ChildState]) {
     for i in (0..children.len()).rev() {
         if children[i].pid.is_some() {
             stop_child(&mut children[i]).await;
