@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
+use crate::process::table::ProcessTable;
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
 use crate::supervisor::spec::{ChildSpec, RestartStrategy, ShutdownStrategy, SupervisorSpec};
@@ -41,6 +43,8 @@ struct ChildState {
     pid: Option<ProcessId>,
     /// Sender to signal the child to shut down (dropped = shutdown signal).
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Handle to the spawned task, used to await completion on shutdown.
+    join_handle: Option<JoinHandle<()>>,
 }
 
 /// Messages the supervisor loop processes.
@@ -106,9 +110,10 @@ pub async fn start_supervisor(
     // Instead, we'll allocate a PID for it conceptually.
     // Actually let's use Runtime::spawn to get a real PID.
     let msg_tx_clone = msg_tx.clone();
+    let table = Arc::clone(runtime.table());
     let pid = runtime
         .spawn(move |_ctx| async move {
-            supervisor_loop(spec, children, msg_rx, msg_tx_clone).await;
+            supervisor_loop(spec, children, msg_rx, msg_tx_clone, table).await;
         })
         .await;
 
@@ -121,6 +126,7 @@ async fn supervisor_loop(
     children: Vec<ChildEntry>,
     mut msg_rx: mpsc::UnboundedReceiver<SupervisorMsg>,
     msg_tx: mpsc::UnboundedSender<SupervisorMsg>,
+    table: Arc<ProcessTable>,
 ) {
     let mut state = SupervisorState {
         strategy: spec.strategy,
@@ -137,13 +143,14 @@ async fn supervisor_loop(
             factory: entry.factory,
             pid: None,
             shutdown_tx: None,
+            join_handle: None,
         };
         state.children.push(child_state);
     }
 
     // Start all children in order
     for i in 0..state.children.len() {
-        start_child(&mut state.children[i], i, &msg_tx);
+        start_child(&mut state.children[i], i, &msg_tx, &table);
     }
 
     // Main event loop
@@ -160,6 +167,7 @@ async fn supervisor_loop(
 
                 state.children[index].pid = None;
                 state.children[index].shutdown_tx = None;
+                state.children[index].join_handle = None;
 
                 let should_restart = state.children[index].spec.restart.should_restart(&reason);
 
@@ -177,7 +185,7 @@ async fn supervisor_loop(
                 // Apply restart strategy
                 match state.strategy {
                     RestartStrategy::OneForOne => {
-                        start_child(&mut state.children[index], index, &msg_tx);
+                        start_child(&mut state.children[index], index, &msg_tx, &table);
                     }
                     RestartStrategy::OneForAll => {
                         // Stop all children in reverse order (except the one that already exited)
@@ -189,7 +197,7 @@ async fn supervisor_loop(
                         }
                         // Restart all in order
                         for i in 0..len {
-                            start_child(&mut state.children[i], i, &msg_tx);
+                            start_child(&mut state.children[i], i, &msg_tx, &table);
                         }
                     }
                     RestartStrategy::RestForOne => {
@@ -202,7 +210,7 @@ async fn supervisor_loop(
                         }
                         // Restart failed child and all subsequent
                         for i in index..len {
-                            start_child(&mut state.children[i], i, &msg_tx);
+                            start_child(&mut state.children[i], i, &msg_tx, &table);
                         }
                     }
                 }
@@ -214,8 +222,9 @@ async fn supervisor_loop(
                     factory: entry.factory,
                     pid: None,
                     shutdown_tx: None,
+                    join_handle: None,
                 };
-                start_child(&mut child_state, idx, &msg_tx);
+                start_child(&mut child_state, idx, &msg_tx, &table);
                 let pid = child_state.pid.unwrap();
                 state.children.push(child_state);
                 let _ = reply.send(Ok(pid));
@@ -273,24 +282,18 @@ fn start_child(
     child: &mut ChildState,
     index: usize,
     msg_tx: &mpsc::UnboundedSender<SupervisorMsg>,
+    table: &ProcessTable,
 ) {
     let factory = Arc::clone(&child.factory);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let msg_tx = msg_tx.clone();
 
-    // We need to generate a PID. We'll use a simple approach: generate a unique
-    // ID via a static counter, same node_id = 0 (supervisor-managed).
-    // Actually, we need real PIDs from the runtime, but we don't have access here.
-    // Let's use a global atomic for now and create synthetic PIDs.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CHILD_PID_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
-    let local_id = CHILD_PID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = ProcessId::new(0, local_id);
+    let pid = table.allocate_pid();
 
     child.pid = Some(pid);
     child.shutdown_tx = Some(shutdown_tx);
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let child_future = factory();
 
         tokio::select! {
@@ -311,6 +314,7 @@ fn start_child(
             }
         }
     });
+    child.join_handle = Some(handle);
 }
 
 /// Stop a single child according to its shutdown strategy.
@@ -324,13 +328,19 @@ async fn stop_child(child: &mut ChildState) {
             ShutdownStrategy::Timeout(duration) => {
                 // Send shutdown signal and wait up to the timeout
                 let _ = tx.send(());
-                // Give a brief moment for the task to process
-                tokio::time::sleep(Duration::from_millis(1).min(*duration)).await;
+                // Actually wait for the task to finish (up to timeout)
+                if let Some(handle) = child.join_handle.take() {
+                    let _ = tokio::time::timeout(*duration, handle).await;
+                    child.pid = None;
+                    return;
+                }
             }
         }
     }
-    // Small yield to let the task finish
-    tokio::task::yield_now().await;
+    // For BrutalKill or if no handle, wait briefly for the task
+    if let Some(handle) = child.join_handle.take() {
+        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
     child.pid = None;
 }
 
@@ -1457,6 +1467,108 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert!(dynamic_started.load(Ordering::SeqCst));
+
+        handle.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // 26. stop_child_awaits_completion
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn stop_child_awaits_completion() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_clone = Arc::clone(&completed);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            // Simulate work that takes a moment after receiving shutdown
+            let _ = shutdown_rx.await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            completed_clone.store(true, Ordering::SeqCst);
+        });
+
+        let spec = ChildSpec::new("test")
+            .shutdown(ShutdownStrategy::Timeout(Duration::from_secs(5)));
+
+        let mut child = ChildState {
+            spec,
+            factory: Arc::new(|| Box::pin(async { ExitReason::Normal })),
+            pid: Some(ProcessId::new(0, 1)),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: Some(handle),
+        };
+
+        stop_child(&mut child).await;
+
+        // After stop_child returns, the child should have completed
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "child should have completed before stop_child returned"
+        );
+        assert!(child.pid.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 27. supervisor_pids_from_process_table
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn supervisor_pids_from_process_table() {
+        let rt = test_runtime();
+        let node_id = rt.node_id();
+
+        // The runtime allocates PIDs sequentially starting at 1.
+        // Record how many PIDs have been allocated so far (0 before any spawn).
+        // start_supervisor itself spawns the supervisor process, consuming one PID.
+
+        let entry = ChildEntry::new(
+            ChildSpec::new("pid_reporter")
+                .restart(RestartType::Temporary),
+            || async {
+                // Stay alive so the supervisor can read our PID
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                ExitReason::Normal
+            },
+        );
+
+        let spec = SupervisorSpec::new(RestartStrategy::OneForOne)
+            .max_restarts(0)
+            .max_seconds(10);
+        let handle = start_supervisor(Arc::clone(&rt), spec, vec![entry]).await;
+
+        // Wait for the child to be started
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The supervisor PID comes from the table (local_id = 1).
+        // The child PID should also come from the table (local_id = 2).
+        let sup_pid = handle.pid();
+        assert_eq!(sup_pid.node_id(), node_id, "supervisor should use runtime's node_id");
+        assert_eq!(sup_pid.local_id(), 1, "supervisor should be first PID from table");
+
+        // Dynamically add another child and verify its PID is from the table too
+        let entry2 = ChildEntry::new(
+            ChildSpec::new("dynamic_child")
+                .restart(RestartType::Temporary),
+            || async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                ExitReason::Normal
+            },
+        );
+        let dynamic_pid = handle.add_child(entry2).await.unwrap();
+
+        // The dynamic child's PID must come from the table, not from the 1_000_000+ range
+        assert_eq!(dynamic_pid.node_id(), node_id, "dynamic child should use runtime's node_id");
+        assert!(
+            dynamic_pid.local_id() < 1_000_000,
+            "child PID local_id {} should come from ProcessTable (< 1_000_000), not static counter",
+            dynamic_pid.local_id()
+        );
+        // It should follow the table's sequential allocation
+        assert!(
+            dynamic_pid.local_id() > sup_pid.local_id(),
+            "dynamic child PID should be allocated after supervisor PID"
+        );
 
         handle.shutdown();
         tokio::time::sleep(Duration::from_millis(50)).await;
