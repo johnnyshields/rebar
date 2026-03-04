@@ -88,7 +88,8 @@ pub fn encode_send_frame(from: ProcessId, to: ProcessId, payload: rmpv::Value) -
 /// Extracts addressing information from the frame header and delivers the
 /// payload to the target process's mailbox via the process table.
 pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), SendError> {
-    let header = frame.header.as_map().expect("frame header must be a Map");
+    let header = frame.header.as_map()
+        .ok_or_else(|| SendError::MalformedFrame("frame header must be a Map".into()))?;
 
     let mut from_node: u64 = 0;
     let mut from_local: u64 = 0;
@@ -98,10 +99,14 @@ pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), 
     for (key, value) in header {
         let key_str = key.as_str().unwrap_or("");
         match key_str {
-            "from_node" => from_node = value.as_u64().expect("from_node must be u64"),
-            "from_local" => from_local = value.as_u64().expect("from_local must be u64"),
-            "to_node" => to_node = value.as_u64().expect("to_node must be u64"),
-            "to_local" => to_local = value.as_u64().expect("to_local must be u64"),
+            "from_node" => from_node = value.as_u64()
+                .ok_or_else(|| SendError::MalformedFrame("from_node must be u64".into()))?,
+            "from_local" => from_local = value.as_u64()
+                .ok_or_else(|| SendError::MalformedFrame("from_local must be u64".into()))?,
+            "to_node" => to_node = value.as_u64()
+                .ok_or_else(|| SendError::MalformedFrame("to_node must be u64".into()))?,
+            "to_local" => to_local = value.as_u64()
+                .ok_or_else(|| SendError::MalformedFrame("to_local must be u64".into()))?,
             _ => {}
         }
     }
@@ -206,5 +211,53 @@ mod tests {
         assert_eq!(frame.payload, rmpv::Value::Integer(42.into()));
         let header = frame.header.as_map().unwrap();
         assert_eq!(header.len(), 4);
+    }
+
+    #[test]
+    fn malformed_header_type() {
+        let table = ProcessTable::new(1);
+        let frame = Frame {
+            version: 1,
+            msg_type: MsgType::Send,
+            request_id: 0,
+            header: rmpv::Value::String("not-a-map".into()),
+            payload: rmpv::Value::Nil,
+        };
+        let result = deliver_inbound_frame(&table, &frame);
+        assert!(matches!(result, Err(SendError::MalformedFrame(_))));
+    }
+
+    #[test]
+    fn malformed_field_type() {
+        let table = ProcessTable::new(1);
+        let frame = Frame {
+            version: 1,
+            msg_type: MsgType::Send,
+            request_id: 0,
+            header: rmpv::Value::Map(vec![(
+                rmpv::Value::String("from_node".into()),
+                rmpv::Value::String("not-a-u64".into()),
+            )]),
+            payload: rmpv::Value::Nil,
+        };
+        let result = deliver_inbound_frame(&table, &frame);
+        assert!(matches!(result, Err(SendError::MalformedFrame(_))));
+    }
+
+    #[test]
+    fn missing_fields_default_to_zero() {
+        let table = ProcessTable::new(1);
+        let frame = Frame {
+            version: 1,
+            msg_type: MsgType::Send,
+            request_id: 0,
+            header: rmpv::Value::Map(vec![]),
+            payload: rmpv::Value::Nil,
+        };
+        // Empty map should not error - missing fields default to 0.
+        // It will fail with ProcessDead since pid <0.0> doesn't exist,
+        // but it should NOT be a MalformedFrame error.
+        let result = deliver_inbound_frame(&table, &frame);
+        assert!(!matches!(result, Err(SendError::MalformedFrame(_))));
     }
 }
