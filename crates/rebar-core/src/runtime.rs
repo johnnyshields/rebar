@@ -168,7 +168,10 @@ impl Runtime {
             table.remove(&pid);
         });
 
-        self.task_handles.lock().unwrap().push(join_handle);
+        let mut handles = self.task_handles.lock().unwrap_or_else(|e| e.into_inner());
+        // Prune completed handles to prevent unbounded growth
+        handles.retain(|h| !h.is_finished());
+        handles.push(join_handle);
 
         pid
     }
@@ -187,7 +190,7 @@ impl Runtime {
     /// then waits up to `timeout` for all spawned tasks to complete.
     pub async fn shutdown(self, timeout: Duration) {
         self.cancel_token.cancel();
-        let handles = std::mem::take(&mut *self.task_handles.lock().unwrap());
+        let handles = std::mem::take(&mut *self.task_handles.lock().unwrap_or_else(|e| e.into_inner()));
         let _ = tokio::time::timeout(timeout, async {
             for h in handles {
                 let _ = h.await;
@@ -631,5 +634,49 @@ mod tests {
             .unwrap();
         assert_eq!(result, "routed");
         assert!(counter_ref.count.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_enforced_on_hung_process() {
+        let rt = Runtime::new(1);
+        rt.spawn(|_ctx| async move {
+            // Ignore cancellation token entirely — just sleep forever
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        })
+        .await;
+
+        let start = tokio::time::Instant::now();
+        rt.shutdown(Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "shutdown should have returned within 500ms, but took {:?}",
+            elapsed,
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_process_panic() {
+        let rt = Runtime::new(1);
+        rt.spawn(|_ctx| async move {
+            panic!("intentional panic in shutdown test");
+        })
+        .await;
+
+        // Give the panic time to resolve
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let start = tokio::time::Instant::now();
+        rt.shutdown(Duration::from_secs(5)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "shutdown after panic should complete quickly, but took {:?}",
+            elapsed,
+        );
     }
 }
