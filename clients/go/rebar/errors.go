@@ -11,7 +11,7 @@ const (
 	errSendFailed  = -2
 	errNotFound    = -3
 	errInvalidName = -4
-	errTimeout    = -5
+	errTimeout     = -5
 )
 
 // RebarError represents an error returned by the Rebar FFI.
@@ -34,12 +34,12 @@ type NotFoundError struct {
 	RebarError
 }
 
-// InvalidNameError is returned when a name is not valid UTF-8.
 // TimeoutError is returned when a recv operation times out.
 type TimeoutError struct {
 	RebarError
 }
 
+// InvalidNameError is returned when a name is not valid UTF-8.
 type InvalidNameError struct {
 	RebarError
 }

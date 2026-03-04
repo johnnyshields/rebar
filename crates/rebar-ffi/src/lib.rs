@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rebar_core::process::mailbox::{Mailbox, MailboxRx};
@@ -43,7 +43,7 @@ pub struct RebarRuntime {
     tokio_rt: tokio::runtime::Runtime,
     runtime: Runtime,
     registry: Mutex<HashMap<String, ProcessId>>,
-    mailboxes: Mutex<HashMap<ProcessId, MailboxRx>>,
+    mailboxes: Mutex<HashMap<ProcessId, Arc<Mutex<MailboxRx>>>>,
     stop_senders: Mutex<HashMap<ProcessId, tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -187,7 +187,7 @@ pub extern "C" fn rebar_spawn(
     table.insert(pid, handle);
 
     // Store the receiver so rebar_recv can use it.
-    rt.mailboxes.lock().unwrap().insert(pid, rx);
+    rt.mailboxes.lock().unwrap().insert(pid, Arc::new(Mutex::new(rx)));
 
     // Create a oneshot channel to keep the process alive until stopped.
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -240,12 +240,13 @@ pub extern "C" fn rebar_recv(
     let rt = unsafe { &*rt };
     let process_id = pid.to_process_id();
 
-    // Take the MailboxRx out of the map so we can mutably borrow it.
-    let mut rx = match rt.mailboxes.lock().unwrap().remove(&process_id) {
-        Some(rx) => rx,
+    // Clone the Arc so we can release the outer map lock before blocking.
+    let rx_arc = match rt.mailboxes.lock().unwrap().get(&process_id) {
+        Some(arc) => Arc::clone(arc),
         None => return REBAR_ERR_NOT_FOUND,
     };
 
+    let mut rx = rx_arc.lock().unwrap();
     let result = if timeout_ms == 0 {
         // Non-blocking: try_recv
         rx.try_recv()
@@ -259,9 +260,7 @@ pub extern "C" fn rebar_recv(
             }
         })
     };
-
-    // Put the MailboxRx back.
-    rt.mailboxes.lock().unwrap().insert(process_id, rx);
+    drop(rx);
 
     match result {
         Some(msg) => {
@@ -396,6 +395,32 @@ pub extern "C" fn rebar_whereis(
             }
             REBAR_OK
         }
+        None => REBAR_ERR_NOT_FOUND,
+    }
+}
+
+/// Unregister a name from the local registry.
+///
+/// Returns 0 on success, `REBAR_ERR_NOT_FOUND` if the name is not
+/// registered, or a negative error code for null pointers / bad UTF-8.
+#[unsafe(no_mangle)]
+pub extern "C" fn rebar_unregister(
+    rt: *mut RebarRuntime,
+    name: *const u8,
+    name_len: usize,
+) -> i32 {
+    if rt.is_null() || name.is_null() {
+        return REBAR_ERR_NULL_PTR;
+    }
+    let rt = unsafe { &*rt };
+    let name_bytes = unsafe { std::slice::from_raw_parts(name, name_len) };
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return REBAR_ERR_INVALID_NAME,
+    };
+    let mut reg = rt.registry.lock().unwrap();
+    match reg.remove(name_str) {
+        Some(_) => REBAR_OK,
         None => REBAR_ERR_NOT_FOUND,
     }
 }
@@ -885,6 +910,45 @@ mod tests {
         let rc = rebar_recv(rt, bad_pid, &mut msg_out, 0);
         assert_eq!(rc, REBAR_ERR_NOT_FOUND);
 
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 21. unregister
+    // -----------------------------------------------------------------------
+    #[test]
+    fn unregister() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn noop(_pid: RebarPid) {}
+
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        let rc = rebar_spawn(rt, Some(noop), &mut pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        let name = b"temp_service";
+        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        let rc = rebar_unregister(rt, name.as_ptr(), name.len());
+        assert_eq!(rc, REBAR_OK);
+
+        let mut found = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found);
+        assert_eq!(rc, REBAR_ERR_NOT_FOUND);
+
+        // Double unregister returns not found.
+        let rc = rebar_unregister(rt, name.as_ptr(), name.len());
+        assert_eq!(rc, REBAR_ERR_NOT_FOUND);
+
+        rebar_stop_process(rt, pid_out);
         rebar_runtime_free(rt);
     }
 }

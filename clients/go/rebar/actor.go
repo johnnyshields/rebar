@@ -92,7 +92,13 @@ func goRebarProcessCallback(pid C.rebar_pid_t) {
 	entry.actor.HandleMessage(ctx, nil)
 
 	// Start a message loop in a goroutine that polls rebar_recv.
+	actorID := activeActorID
 	go func() {
+		defer func() {
+			actorMu.Lock()
+			delete(actorMap, actorID)
+			actorMu.Unlock()
+		}()
 		for {
 			var msgOut *C.rebar_msg_t
 			rc := C.rebar_recv(

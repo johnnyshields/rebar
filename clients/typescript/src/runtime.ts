@@ -226,14 +226,18 @@ export class Runtime implements Disposable {
 
         // Start async message polling loop.
         (async () => {
-          while (true) {
-            const data = runtimeRef.recv(pid, 100n);
-            if (data === null) {
-              // Timeout - yield and retry
-              await new Promise((r) => setTimeout(r, 0));
-              continue;
+          try {
+            while (true) {
+              const data = runtimeRef.recv(pid, 100n);
+              if (data === null) {
+                // Timeout - yield and retry
+                await new Promise((r) => setTimeout(r, 0));
+                continue;
+              }
+              actor.handleMessage(ctx, data);
             }
-            actor.handleMessage(ctx, data);
+          } catch {
+            // Process stopped or error — exit loop.
           }
         })();
       },

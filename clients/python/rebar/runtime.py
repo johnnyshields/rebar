@@ -7,7 +7,7 @@ import threading
 from typing import TYPE_CHECKING, Optional
 
 from . import _ffi
-from .errors import check_error, TimeoutError
+from .errors import check_error
 from .types import Pid
 
 if TYPE_CHECKING:
@@ -166,11 +166,14 @@ class Runtime:
 
             # Start background message loop
             def message_loop() -> None:
-                while True:
-                    data = runtime_ref.recv(pid, timeout_ms=100)
-                    if data is None:
-                        continue
-                    actor.handle_message(ctx, data)
+                try:
+                    while True:
+                        data = runtime_ref.recv(pid, timeout_ms=100)
+                        if data is None:
+                            continue
+                        actor.handle_message(ctx, data)
+                except Exception:
+                    return  # process stopped or error
 
             t = threading.Thread(target=message_loop, daemon=True)
             t.start()

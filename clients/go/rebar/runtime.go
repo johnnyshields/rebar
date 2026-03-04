@@ -99,9 +99,13 @@ func (r *Runtime) Unregister(name string) error {
 
 // Recv receives a message from a process's mailbox.
 // timeoutMs: 0 = non-blocking, >0 = timeout in ms, <0 = block forever.
+// Returns (nil, nil) on timeout.
 func (r *Runtime) Recv(pid Pid, timeoutMs int64) (*Msg, error) {
 	var msgOut *C.rebar_msg_t
 	rc := C.rebar_recv(r.ptr, pidToC(pid), &msgOut, C.int64_t(timeoutMs))
+	if int(rc) == errTimeout {
+		return nil, nil
+	}
 	if err := checkError(rc); err != nil {
 		return nil, err
 	}
