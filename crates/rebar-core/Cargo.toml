@@ -10,6 +10,7 @@ description = "Core actor primitives and supervision for the Rebar runtime"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 rmpv = "1"
+rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"

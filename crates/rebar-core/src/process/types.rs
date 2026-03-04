@@ -58,6 +58,15 @@ impl Message {
     pub fn timestamp(&self) -> u64 {
         self.timestamp
     }
+
+    /// Try to deserialize the payload as a typed value.
+    /// Works with messages sent via `send_typed`.
+    pub fn deserialize<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        match &self.payload {
+            rmpv::Value::Binary(bytes) => rmp_serde::from_slice(bytes).ok(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +83,7 @@ impl ExitReason {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SendError {
     #[error("process dead: {0}")]
     ProcessDead(ProcessId),
@@ -82,6 +91,18 @@ pub enum SendError {
     MailboxFull(ProcessId),
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
+    #[error("serialization error: {0}")]
+    SerializationError(String),
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RegistryError {
+    #[error("name already registered: {0}")]
+    NameAlreadyRegistered(String),
+    #[error("process not found: {0}")]
+    ProcessNotFound(ProcessId),
+    #[error("name not found: {0}")]
+    NameNotFound(String),
 }
 
 #[cfg(test)]
