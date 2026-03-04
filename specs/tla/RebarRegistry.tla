@@ -181,14 +181,6 @@ ConvergenceAfterFullExchange ==
     \A n1, n2 \in Nodes : \A name \in Names :
         reg_entries[n1][name] = reg_entries[n2][name]
 
-\* A tombstoned tag, when applied as an Add delta, is always rejected.
-\* This is equivalent to NoTombstoneResurrection and serves as the
-\* explicit per-action check for the tombstone-before-add ordering bug.
-TombstoneBeforeAdd ==
-    \A n \in Nodes : \A name \in Names :
-        \A e \in reg_entries[n][name] :
-            e.tag \notin tombstones[n]
-
 ----
 (****************************************************************************)
 (* State constraint for finite model checking                               *)

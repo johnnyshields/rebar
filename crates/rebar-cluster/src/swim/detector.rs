@@ -36,9 +36,16 @@ impl FailureDetector {
 
     /// A node responded to a ping (or indirect ping).
     /// If it was suspected, move it back to Alive and remove the suspect timer.
+    ///
+    /// TLA+: `NodeRecordAck` — bumps incarnation locally by 1 and sets
+    /// state to Alive. Critically, NO gossip is generated. This local-only
+    /// bump is the root cause of the re-suspect vulnerability: other nodes
+    /// don't learn the new incarnation, so a subsequent Suspect gossip at
+    /// the same incarnation passes the `>=` guard and re-suspects the node.
     pub fn record_ack(&mut self, members: &mut MembershipList, node_id: u64) {
         if let Some(member) = members.get_mut(node_id) {
             if member.state == NodeState::Suspect {
+                // TLA+: `incarnation' = incarnation[n][m] + 1` (local only, no gossip)
                 member.state = NodeState::Alive;
                 member.incarnation += 1;
             }
@@ -48,6 +55,10 @@ impl FailureDetector {
 
     /// A node did not respond to a direct ping.
     /// Mark it suspect and start a timer (if not already suspected).
+    ///
+    /// TLA+: `NodeSuspectsOther` — suspects at current observed incarnation.
+    /// The `member.suspect(member.incarnation)` call uses the `>=` guard
+    /// which is trivially true (inc >= inc), so the transition always fires.
     pub fn record_nack(&mut self, members: &mut MembershipList, node_id: u64, now: Instant) {
         if let Some(member) = members.get_mut(node_id) {
             if member.state == NodeState::Alive {
@@ -59,6 +70,8 @@ impl FailureDetector {
 
     /// Check all suspect timers against the config's suspect_timeout.
     /// Returns the list of node_ids that have been newly declared dead.
+    ///
+    /// TLA+: `SuspectTimeoutFires` — transitions Suspect -> Dead.
     pub fn check_suspect_timeouts(
         &mut self,
         members: &mut MembershipList,

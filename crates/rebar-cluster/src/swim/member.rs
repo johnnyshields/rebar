@@ -30,26 +30,47 @@ impl Member {
         }
     }
 
+    /// Apply a Suspect message with the given incarnation number.
+    ///
+    /// TLA+: `NodeReceivesSuspectGossip` — non-strict `>=` guard is critical.
+    /// The `>=` (vs strict `>` in `alive`) means a Suspect message at the
+    /// *same* incarnation will override Alive state. This asymmetry enables
+    /// the re-suspect bug modeled in `RebarSwim.tla`.
     pub fn suspect(&mut self, incarnation: u64) {
+        // TLA+: `node_state[n][m] # "Dead"` — Dead is terminal
         if self.state == NodeState::Dead {
             return;
         }
+        // TLA+: `msg.inc >= incarnation[n][msg.target]` (non-strict >=)
         if incarnation >= self.incarnation {
             self.state = NodeState::Suspect;
             self.incarnation = incarnation;
         }
     }
 
+    /// Apply an Alive message with the given incarnation number.
+    ///
+    /// TLA+: `NodeReceivesAliveGossip` — strict `>` guard.
+    /// Only a *strictly higher* incarnation can override Suspect state back
+    /// to Alive. Combined with the `>=` in `suspect`, this creates the
+    /// asymmetry that traps nodes in Suspect when `record_ack` bumps
+    /// incarnation locally without gossip.
     pub fn alive(&mut self, incarnation: u64) {
+        // TLA+: `node_state[n][msg.target] # "Dead"` — Dead is terminal
         if self.state == NodeState::Dead {
             return;
         }
+        // TLA+: `msg.inc > incarnation[n][msg.target]` (strict >)
         if incarnation > self.incarnation {
             self.state = NodeState::Alive;
             self.incarnation = incarnation;
         }
     }
 
+    /// Transition to Dead state (terminal).
+    ///
+    /// TLA+: `SuspectTimeoutFires` — once Dead, `DeadIsTerminal` property
+    /// guarantees no transition back to Alive or Suspect.
     pub fn dead(&mut self) {
         self.state = NodeState::Dead;
     }

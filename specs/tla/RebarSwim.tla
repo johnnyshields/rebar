@@ -189,9 +189,10 @@ AliveNodeNotPermanentlyDead ==
 
 \* Incarnation numbers at a given observer never decrease for a given target.
 \* Bug: out-of-order gossip delivery overwrites a higher incarnation with lower.
+\* This is an action property (checked over transitions), not a state invariant.
 IncarnationMonotonicity ==
-    \A n \in Nodes : \A m \in Nodes :
-        incarnation[n][m] >= 0
+    [][\A n \in Nodes : \A m \in Nodes :
+        incarnation'[n][m] >= incarnation[n][m]]_vars
 
 \* Once Dead, a node's state never transitions back to Alive or Suspect.
 \* Mirrors the Dead guard at the top of suspect() and alive().

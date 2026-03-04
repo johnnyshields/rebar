@@ -65,6 +65,10 @@ impl Registry {
     ///
     /// Returns the entry with the highest timestamp. If timestamps are equal,
     /// the entry with the higher node_id wins (deterministic tiebreaker).
+    ///
+    /// TLA+: `Winner(entries)` uses `Beats(a, b)` with strict `>` on ts
+    /// then node_id. The `LWWDeterminism` invariant verifies that identical
+    /// entry sets always yield the same winner.
     pub fn lookup(&self, name: &str) -> Option<&RegistryEntry> {
         self.entries.get(name).and_then(|entries| {
             entries.iter().max_by(|a, b| {
@@ -79,6 +83,9 @@ impl Registry {
     ///
     /// Returns a list of `Remove` deltas (one per tag) for replication,
     /// or `None` if the name was not registered.
+    ///
+    /// TLA+: `Unregister(n, name)` — tombstones all current tags and
+    /// generates Remove deltas for each.
     pub fn unregister(&mut self, name: &str) -> Option<Vec<RegistryDelta>> {
         let entries = self.entries.remove(name)?;
         if entries.is_empty() {
@@ -155,14 +162,19 @@ impl Registry {
     ///
     /// - `Add`: adds the entry if its tag is not tombstoned and not already present.
     /// - `Remove`: tombstones the tag and removes the entry from the entries map.
+    ///
+    /// TLA+: `ApplyAdd` / `ApplyRemove` — the tombstone check BEFORE insert
+    /// in the Add branch is the critical ordering verified by the
+    /// `NoTombstoneResurrection` invariant. If tombstone check were AFTER
+    /// insert, a Remove-then-Add sequence would resurrect a deleted entry.
     pub fn merge_delta(&mut self, delta: RegistryDelta) {
         match delta {
             RegistryDelta::Add(entry) => {
-                // A tombstoned tag cannot be re-added (prevents resurrection)
+                // TLA+: `d.tag \notin tombstones[n]` — tombstone guard FIRST
                 if self.tombstones.contains(&entry.tag) {
                     return;
                 }
-                // Check for idempotent add (tag already exists)
+                // TLA+: `\A e \in reg_entries[n][d.name] : e.tag # d.tag` — idempotency
                 let entries = self.entries.entry(entry.name.clone()).or_default();
                 if entries.iter().any(|e| e.tag == entry.tag) {
                     return;
@@ -170,6 +182,7 @@ impl Registry {
                 entries.push(entry);
             }
             RegistryDelta::Remove { name, tag } => {
+                // TLA+: `ApplyRemove` — tombstone the tag, then remove matching entry
                 self.tombstones.insert(tag);
                 if let Some(entries) = self.entries.get_mut(&name) {
                     entries.retain(|e| e.tag != tag);

@@ -5,9 +5,12 @@
 \* Models the three restart strategies (OneForOne, OneForAll, RestForOne)
 \* and the stale-PID check that prevents double-processing of exit events.
 \*
+\* Run: tlc RebarSupervisor -config RebarSupervisor.cfg -workers 4
+\*
 \* Key invariants:
 \*   NoDoubleLiveChild    -- OneForAll race: wrong PID check → two tasks per child
-\*   StaleExitSafety      -- stale PID exit must be a no-op
+\*   NoPIDSharing         -- no two children share the same PID
+\*   StaleExitSafety      -- stale PID exit must be a no-op (action property)
 \*   RestartLimitRespected -- off-by-one: <= max vs < max
 \*   PIDMonotonicity       -- no PID reuse (next_pid is strictly increasing)
 \*   NoRestartAfterShutdown -- missing guard in shutdown path
@@ -284,10 +287,21 @@ NoDoubleLiveChild ==
     \A i \in Children :
         child_status[i] = "running" => child_pid[i] # None
 
-\* All child states are valid (no impossible state combinations).
+\* A stale exit (PID mismatch) must be a no-op: child_pid and child_status
+\* remain unchanged. This is an action property verifying that processing a
+\* stale exit does not alter any child's state.
+\* Bug hunted: without the PID guard, stale exits trigger spurious restarts.
 StaleExitSafety ==
-    \A i \in Children :
-        child_status[i] \in {"running", "stopping", "stopped"}
+    [][Len(sup_queue) > 0 /\ child_pid[Head(sup_queue).index] # Head(sup_queue).pid
+       => child_pid' = child_pid /\ child_status' = child_status]_vars
+
+\* No two distinct children share the same non-None PID.
+\* Bug hunted: OneForAll race where two children get the same PID due to
+\* non-atomic PID counter increment.
+NoPIDSharing ==
+    \A i, j \in Children :
+        i # j /\ child_pid[i] # None /\ child_pid[j] # None =>
+        child_pid[i] # child_pid[j]
 
 \* Restart count never exceeds MaxRestarts unless supervisor has shut down.
 \* Bug hunted: <= vs < off-by-one in check_restart_limit.
