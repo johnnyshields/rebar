@@ -99,16 +99,22 @@ impl ProcessTable {
     /// Register a name for a process.
     ///
     /// Fails if the name is already taken or the PID is not in the table.
+    /// Uses `DashMap::entry` for atomic check-and-insert to avoid TOCTOU races.
     pub fn register_name(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
         if !self.processes.contains_key(&pid) {
             return Err(RegistryError::ProcessNotFound(pid));
         }
-        if self.names.contains_key(&name) {
-            return Err(RegistryError::NameAlreadyRegistered(name));
+        let entry = self.names.entry(name.clone());
+        match entry {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                Err(RegistryError::NameAlreadyRegistered(name))
+            }
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(pid);
+                self.reverse_names.entry(pid).or_default().push(name);
+                Ok(())
+            }
         }
-        self.names.insert(name.clone(), pid);
-        self.reverse_names.entry(pid).or_default().push(name);
-        Ok(())
     }
 
     /// Unregister a name, returning the PID it was associated with.
@@ -272,5 +278,73 @@ mod tests {
         let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
         assert!(!table.is_empty());
+    }
+
+    #[test]
+    fn register_and_whereis() {
+        let table = ProcessTable::new(1);
+        let pid = table.allocate_pid();
+        let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
+        table.insert(pid, ProcessHandle::new(tx));
+        assert!(table.register_name("svc".to_string(), pid).is_ok());
+        assert_eq!(table.whereis("svc"), Some(pid));
+    }
+
+    #[test]
+    fn whereis_not_found() {
+        let table = ProcessTable::new(1);
+        assert_eq!(table.whereis("nope"), None);
+    }
+
+    #[test]
+    fn register_duplicate_name_fails() {
+        let table = ProcessTable::new(1);
+        let pid = table.allocate_pid();
+        let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
+        table.insert(pid, ProcessHandle::new(tx));
+        assert!(table.register_name("dup".to_string(), pid).is_ok());
+        let err = table.register_name("dup".to_string(), pid).unwrap_err();
+        assert_eq!(err, RegistryError::NameAlreadyRegistered("dup".to_string()));
+    }
+
+    #[test]
+    fn register_nonexistent_pid_fails() {
+        let table = ProcessTable::new(1);
+        let pid = ProcessId::new(1, 999);
+        let err = table.register_name("ghost".to_string(), pid).unwrap_err();
+        assert_eq!(err, RegistryError::ProcessNotFound(pid));
+    }
+
+    #[test]
+    fn unregister_name() {
+        let table = ProcessTable::new(1);
+        let pid = table.allocate_pid();
+        let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
+        table.insert(pid, ProcessHandle::new(tx));
+        table.register_name("temp".to_string(), pid).unwrap();
+        assert_eq!(table.unregister_name("temp"), Ok(pid));
+        assert_eq!(table.whereis("temp"), None);
+    }
+
+    #[test]
+    fn unregister_not_found() {
+        let table = ProcessTable::new(1);
+        let err = table.unregister_name("nope").unwrap_err();
+        assert_eq!(err, RegistryError::NameNotFound("nope".to_string()));
+    }
+
+    #[test]
+    fn remove_process_cleans_up_names() {
+        let table = ProcessTable::new(1);
+        let pid = table.allocate_pid();
+        let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
+        table.insert(pid, ProcessHandle::new(tx));
+        table.register_name("a".to_string(), pid).unwrap();
+        table.register_name("b".to_string(), pid).unwrap();
+        assert!(table.whereis("a").is_some());
+        assert!(table.whereis("b").is_some());
+        table.remove(&pid);
+        assert_eq!(table.whereis("a"), None);
+        assert_eq!(table.whereis("b"), None);
     }
 }

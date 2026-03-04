@@ -151,7 +151,7 @@ impl Runtime {
     /// Send a message to a named process.
     pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
         let pid = self.table.whereis(name)
-            .ok_or(SendError::ProcessDead(ProcessId::new(0, 0)))?;
+            .ok_or_else(|| SendError::NameNotFound(name.to_owned()))?;
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, pid, payload)
     }
@@ -472,5 +472,66 @@ mod tests {
             .unwrap();
         assert_eq!(result, "routed");
         assert!(counter_ref.count.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn register_and_whereis() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            // Stay alive long enough for the test.
+            ctx.recv_timeout(std::time::Duration::from_secs(1)).await;
+        }).await;
+        rt.register("svc".to_string(), pid).unwrap();
+        assert_eq!(rt.whereis("svc"), Some(pid));
+    }
+
+    #[tokio::test]
+    async fn register_duplicate_name_fails() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            ctx.recv_timeout(std::time::Duration::from_secs(1)).await;
+        }).await;
+        rt.register("dup".to_string(), pid).unwrap();
+        assert!(rt.register("dup".to_string(), pid).is_err());
+    }
+
+    #[tokio::test]
+    async fn unregister_name() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            ctx.recv_timeout(std::time::Duration::from_secs(1)).await;
+        }).await;
+        rt.register("temp".to_string(), pid).unwrap();
+        let removed = rt.unregister("temp").unwrap();
+        assert_eq!(removed, pid);
+        assert_eq!(rt.whereis("temp"), None);
+    }
+
+    #[tokio::test]
+    async fn unregister_not_found() {
+        let rt = Runtime::new(1);
+        assert!(rt.unregister("nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn send_named_delivers_message() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let pid = rt.spawn(move |mut ctx| async move {
+            let msg = ctx.recv().await.unwrap();
+            done_tx.send(msg.payload().clone()).unwrap();
+        }).await;
+        rt.register("worker".to_string(), pid).unwrap();
+        rt.send_named("worker", rmpv::Value::Binary(b"hi".to_vec())).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await.unwrap().unwrap();
+        assert_eq!(result, rmpv::Value::Binary(b"hi".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn send_named_not_found() {
+        let rt = Runtime::new(1);
+        let err = rt.send_named("ghost", rmpv::Value::Nil).unwrap_err();
+        assert_eq!(err, SendError::NameNotFound("ghost".to_string()));
     }
 }

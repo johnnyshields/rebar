@@ -1,4 +1,4 @@
-use rebar_core::process::ProcessId;
+use rebar_core::process::{ProcessId, RegistryError};
 use rebar_core::runtime::Runtime;
 
 // ---------------------------------------------------------------------------
@@ -46,6 +46,7 @@ const REBAR_ERR_NULL_PTR: i32 = -1;
 const REBAR_ERR_SEND_FAILED: i32 = -2;
 const REBAR_ERR_NOT_FOUND: i32 = -3;
 const REBAR_ERR_INVALID_NAME: i32 = -4;
+const REBAR_ERR_ALREADY_EXISTS: i32 = -5;
 
 // ---------------------------------------------------------------------------
 // Message functions
@@ -232,7 +233,9 @@ pub extern "C" fn rebar_register(
     };
     match rt.runtime.register(name_str, pid.to_process_id()) {
         Ok(()) => REBAR_OK,
-        Err(_) => REBAR_ERR_NOT_FOUND,
+        Err(RegistryError::NameAlreadyRegistered(_)) => REBAR_ERR_ALREADY_EXISTS,
+        Err(RegistryError::ProcessNotFound(_)) => REBAR_ERR_NOT_FOUND,
+        Err(RegistryError::NameNotFound(_)) => REBAR_ERR_NOT_FOUND,
     }
 }
 
@@ -322,6 +325,7 @@ pub extern "C" fn rebar_send_named(
 
     match rt_ref.runtime.send_named(name_str, payload) {
         Ok(()) => REBAR_OK,
+        Err(rebar_core::process::SendError::NameNotFound(_)) => REBAR_ERR_NOT_FOUND,
         Err(_) => REBAR_ERR_SEND_FAILED,
     }
 }
@@ -693,6 +697,51 @@ mod tests {
         let rc = rebar_unregister(rt, name.as_ptr(), name.len());
         assert_eq!(rc, REBAR_ERR_NOT_FOUND);
 
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. register_duplicate_returns_already_exists
+    // -----------------------------------------------------------------------
+    #[test]
+    fn register_duplicate_returns_already_exists() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn idle_callback(_pid: RebarPid) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        let mut pid_out = RebarPid { node_id: 0, local_id: 0 };
+        let rc = rebar_spawn(rt, Some(idle_callback), &mut pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        let name = b"unique_name";
+        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        // Registering the same name again should return ALREADY_EXISTS.
+        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
+        assert_eq!(rc, REBAR_ERR_ALREADY_EXISTS);
+
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. send_named_not_found
+    // -----------------------------------------------------------------------
+    #[test]
+    fn send_named_not_found_returns_error() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        let name = b"ghost";
+        let data = b"msg";
+        let msg = rebar_msg_create(data.as_ptr(), data.len());
+        let rc = rebar_send_named(rt, name.as_ptr(), name.len(), msg);
+        assert_eq!(rc, REBAR_ERR_NOT_FOUND);
+
+        rebar_msg_free(msg);
         rebar_runtime_free(rt);
     }
 }

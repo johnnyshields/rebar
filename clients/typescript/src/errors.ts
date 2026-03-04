@@ -30,6 +30,14 @@ export class InvalidNameError extends RebarError {
   }
 }
 
+/** Raised when a name is already registered. */
+export class AlreadyExistsError extends RebarError {
+  constructor() {
+    super(-5, "name already registered");
+    this.name = "AlreadyExistsError";
+  }
+}
+
 export function checkError(rc: number): void {
   switch (rc) {
     case 0:
@@ -42,6 +50,8 @@ export function checkError(rc: number): void {
       throw new NotFoundError();
     case -4:
       throw new InvalidNameError();
+    case -5:
+      throw new AlreadyExistsError();
     default:
       throw new RebarError(rc, "unknown error");
   }

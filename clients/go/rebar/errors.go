@@ -6,11 +6,12 @@ import "fmt"
 
 // Error codes from rebar-ffi.
 const (
-	errOK          = 0
-	errNullPtr     = -1
-	errSendFailed  = -2
-	errNotFound    = -3
-	errInvalidName = -4
+	errOK            = 0
+	errNullPtr       = -1
+	errSendFailed    = -2
+	errNotFound      = -3
+	errInvalidName   = -4
+	errAlreadyExists = -5
 )
 
 // RebarError represents an error returned by the Rebar FFI.
@@ -38,6 +39,11 @@ type InvalidNameError struct {
 	RebarError
 }
 
+// AlreadyExistsError is returned when a name is already registered.
+type AlreadyExistsError struct {
+	RebarError
+}
+
 func checkError(rc C.int32_t) error {
 	switch int(rc) {
 	case errOK:
@@ -50,6 +56,8 @@ func checkError(rc C.int32_t) error {
 		return &NotFoundError{RebarError{Code: errNotFound, Message: "name not found in registry"}}
 	case errInvalidName:
 		return &InvalidNameError{RebarError{Code: errInvalidName, Message: "name is not valid UTF-8"}}
+	case errAlreadyExists:
+		return &AlreadyExistsError{RebarError{Code: errAlreadyExists, Message: "name already registered"}}
 	default:
 		return &RebarError{Code: int(rc), Message: "unknown error"}
 	}
