@@ -1,14 +1,13 @@
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
-use super::spec::{ChildSpec, RestartType, ShutdownStrategy};
+use super::common::{check_restart_limit, shutdown_child_task};
+use super::spec::{ChildSpec, RestartType, SupervisorError};
 use super::engine::{ChildFactory, ChildEntry};
 
 static DYN_CHILD_PID_COUNTER: AtomicU64 = AtomicU64::new(2_000_000);
@@ -61,8 +60,8 @@ struct DynChildState {
 
 enum DynSupervisorMsg {
     ChildExited { pid: ProcessId, reason: ExitReason },
-    StartChild { entry: ChildEntry, reply: oneshot::Sender<Result<ProcessId, String>> },
-    TerminateChild { pid: ProcessId, reply: oneshot::Sender<Result<(), String>> },
+    StartChild { entry: ChildEntry, reply: oneshot::Sender<Result<ProcessId, SupervisorError>> },
+    TerminateChild { pid: ProcessId, reply: oneshot::Sender<Result<(), SupervisorError>> },
     CountChildren { reply: oneshot::Sender<DynChildCounts> },
     WhichChildren { reply: oneshot::Sender<Vec<DynChildInfo>> },
     Shutdown,
@@ -96,39 +95,39 @@ impl DynamicSupervisorHandle {
     }
 
     /// Start a new child in the dynamic supervisor.
-    pub async fn start_child(&self, entry: ChildEntry) -> Result<ProcessId, String> {
+    pub async fn start_child(&self, entry: ChildEntry) -> Result<ProcessId, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(DynSupervisorMsg::StartChild { entry, reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
     /// Terminate a child by PID.
-    pub async fn terminate_child(&self, pid: ProcessId) -> Result<(), String> {
+    pub async fn terminate_child(&self, pid: ProcessId) -> Result<(), SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(DynSupervisorMsg::TerminateChild { pid, reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
     /// Get count of active children.
-    pub async fn count_children(&self) -> Result<DynChildCounts, String> {
+    pub async fn count_children(&self) -> Result<DynChildCounts, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(DynSupervisorMsg::CountChildren { reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)
     }
 
     /// Get information about all children.
-    pub async fn which_children(&self) -> Result<Vec<DynChildInfo>, String> {
+    pub async fn which_children(&self) -> Result<Vec<DynChildInfo>, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(DynSupervisorMsg::WhichChildren { reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)
     }
 
     /// Request the dynamic supervisor to shut down.
@@ -160,7 +159,7 @@ async fn dynamic_supervisor_loop(
     msg_tx: mpsc::UnboundedSender<DynSupervisorMsg>,
 ) {
     let mut children: HashMap<ProcessId, DynChildState> = HashMap::new();
-    let mut restart_times: VecDeque<Instant> = VecDeque::new();
+    let mut restart_times = std::collections::VecDeque::new();
     let max_restarts = spec.max_restarts;
     let max_seconds = spec.max_seconds;
     let max_children = spec.max_children;
@@ -171,7 +170,7 @@ async fn dynamic_supervisor_loop(
                 if let Some(limit) = max_children
                     && children.len() >= limit
                 {
-                    let _ = reply.send(Err("max_children limit reached".to_string()));
+                    let _ = reply.send(Err(SupervisorError::MaxChildren));
                     continue;
                 }
 
@@ -222,7 +221,7 @@ async fn dynamic_supervisor_loop(
                         let _ = reply.send(Ok(()));
                     }
                     None => {
-                        let _ = reply.send(Err("child not found".to_string()));
+                        let _ = reply.send(Err(SupervisorError::NotFound(pid.to_string())));
                     }
                 }
             }
@@ -279,48 +278,10 @@ fn spawn_dyn_child(
     (pid, shutdown_tx, handle)
 }
 
-fn check_restart_limit(
-    restart_times: &mut VecDeque<Instant>,
-    max_restarts: u32,
-    max_seconds: u32,
-) -> bool {
-    if max_restarts == 0 {
-        return false;
-    }
-
-    let now = Instant::now();
-    let window = Duration::from_secs(max_seconds as u64);
-
-    restart_times.push_back(now);
-
-    while let Some(&front) = restart_times.front() {
-        if now.duration_since(front) > window {
-            restart_times.pop_front();
-        } else {
-            break;
-        }
-    }
-
-    (restart_times.len() as u32) <= max_restarts
-}
-
 async fn stop_dyn_child(child: &mut DynChildState) {
     let shutdown_tx = child.shutdown_tx.take();
     let join_handle = child.join_handle.take();
-
-    match (&child.spec.shutdown, shutdown_tx, join_handle) {
-        (ShutdownStrategy::BrutalKill, _tx, Some(handle)) => {
-            handle.abort();
-            let _ = handle.await;
-        }
-        (ShutdownStrategy::Timeout(duration), Some(tx), Some(handle)) => {
-            let _ = tx.send(());
-            if tokio::time::timeout(*duration, handle).await.is_err() {
-                // Timed out
-            }
-        }
-        _ => {}
-    }
+    shutdown_child_task(&child.spec.shutdown, shutdown_tx, join_handle).await;
 }
 
 async fn shutdown_all_dyn_children(children: &mut HashMap<ProcessId, DynChildState>) {
@@ -332,7 +293,9 @@ async fn shutdown_all_dyn_children(children: &mut HashMap<ProcessId, DynChildSta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+    use crate::supervisor::spec::ShutdownStrategy;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+    use std::time::Duration;
 
     fn make_runtime() -> Arc<Runtime> {
         Arc::new(Runtime::new(1))
@@ -416,7 +379,7 @@ mod tests {
         assert!(handle.start_child(e2).await.is_ok());
         let result = handle.start_child(e3).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("max_children"));
+        assert!(matches!(result.unwrap_err(), SupervisorError::MaxChildren));
 
         handle.shutdown();
     }
@@ -643,5 +606,107 @@ mod tests {
 
         let result = handle.count_children().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn brutal_kill_terminates_child_immediately() {
+        let rt = make_runtime();
+        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let started = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+
+        let entry = ChildEntry::new(
+            ChildSpec::new("brutal")
+                .restart(RestartType::Temporary)
+                .shutdown(ShutdownStrategy::BrutalKill),
+            move || {
+                let s = Arc::clone(&started_clone);
+                async move {
+                    s.store(true, AtomicOrdering::SeqCst);
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                }
+            },
+        );
+        let pid = handle.start_child(entry).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(started.load(AtomicOrdering::SeqCst));
+
+        let before = std::time::Instant::now();
+        handle.terminate_child(pid).await.unwrap();
+        assert!(before.elapsed() < Duration::from_secs(1));
+
+        let counts = handle.count_children().await.unwrap();
+        assert_eq!(counts.active, 0);
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn timeout_shutdown_sends_signal_and_waits() {
+        let rt = make_runtime();
+        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let started = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+
+        let entry = ChildEntry::new(
+            ChildSpec::new("timeout_child")
+                .restart(RestartType::Temporary)
+                .shutdown(ShutdownStrategy::Timeout(Duration::from_millis(200))),
+            move || {
+                let s = Arc::clone(&started_clone);
+                async move {
+                    s.store(true, AtomicOrdering::SeqCst);
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                }
+            },
+        );
+        let pid = handle.start_child(entry).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(started.load(AtomicOrdering::SeqCst));
+
+        let before = std::time::Instant::now();
+        handle.terminate_child(pid).await.unwrap();
+        assert!(before.elapsed() < Duration::from_secs(2));
+
+        let counts = handle.count_children().await.unwrap();
+        assert_eq!(counts.active, 0);
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn infinity_shutdown_awaits_child_completion() {
+        let rt = make_runtime();
+        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_clone = Arc::clone(&completed);
+
+        let entry = ChildEntry::new(
+            ChildSpec::new("infinity_child")
+                .restart(RestartType::Temporary)
+                .shutdown(ShutdownStrategy::Infinity),
+            move || {
+                let c = Arc::clone(&completed_clone);
+                async move {
+                    // Simulate work then exit when shutdown signal received
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    c.store(true, AtomicOrdering::SeqCst);
+                    ExitReason::Normal
+                }
+            },
+        );
+        let pid = handle.start_child(entry).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        handle.terminate_child(pid).await.unwrap();
+
+        let counts = handle.count_children().await.unwrap();
+        assert_eq!(counts.active, 0);
+
+        handle.shutdown();
     }
 }

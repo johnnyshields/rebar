@@ -1,4 +1,5 @@
 use crate::process::ExitReason;
+use std::fmt;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +45,27 @@ pub enum ShutdownStrategy {
     BrutalKill,
     Infinity,
 }
+
+#[derive(Debug)]
+pub enum SupervisorError {
+    NotFound(String),
+    Gone,
+    MaxChildren,
+    StillRunning(String),
+}
+
+impl fmt::Display for SupervisorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SupervisorError::NotFound(id) => write!(f, "child not found: {}", id),
+            SupervisorError::Gone => write!(f, "supervisor gone"),
+            SupervisorError::MaxChildren => write!(f, "max_children limit reached"),
+            SupervisorError::StillRunning(id) => write!(f, "child is still running: {}", id),
+        }
+    }
+}
+
+impl std::error::Error for SupervisorError {}
 
 pub struct SupervisorSpec {
     pub strategy: RestartStrategy,

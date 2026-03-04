@@ -2,16 +2,20 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
+use crate::supervisor::common::{check_restart_limit, shutdown_child_task};
 use crate::supervisor::spec::{
-    AutoShutdown, ChildSpec, ChildType, RestartStrategy, RestartType, ShutdownStrategy,
+    AutoShutdown, ChildSpec, ChildType, RestartStrategy, RestartType, SupervisorError,
     SupervisorSpec,
 };
+
+static CHILD_PID_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
 
 pub type ChildFactory =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ExitReason> + Send>> + Send + Sync>;
@@ -67,20 +71,20 @@ enum SupervisorMsg {
     },
     AddChild {
         entry: ChildEntry,
-        reply: oneshot::Sender<Result<ProcessId, String>>,
+        reply: oneshot::Sender<Result<ProcessId, SupervisorError>>,
     },
     Shutdown,
     TerminateChild {
         id: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), SupervisorError>>,
     },
     RestartChild {
         id: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), SupervisorError>>,
     },
     DeleteChild {
         id: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), SupervisorError>>,
     },
     CountChildren {
         reply: oneshot::Sender<ChildCounts>,
@@ -101,68 +105,68 @@ impl SupervisorHandle {
         self.pid
     }
 
-    pub async fn add_child(&self, entry: ChildEntry) -> Result<ProcessId, String> {
+    pub async fn add_child(&self, entry: ChildEntry) -> Result<ProcessId, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::AddChild {
                 entry,
                 reply: reply_tx,
             })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
     pub fn shutdown(&self) {
         let _ = self.msg_tx.send(SupervisorMsg::Shutdown);
     }
 
-    pub async fn terminate_child(&self, id: &str) -> Result<(), String> {
+    pub async fn terminate_child(&self, id: &str) -> Result<(), SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::TerminateChild {
                 id: id.to_string(),
                 reply: reply_tx,
             })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
-    pub async fn restart_child(&self, id: &str) -> Result<(), String> {
+    pub async fn restart_child(&self, id: &str) -> Result<(), SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::RestartChild {
                 id: id.to_string(),
                 reply: reply_tx,
             })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
-    pub async fn delete_child(&self, id: &str) -> Result<(), String> {
+    pub async fn delete_child(&self, id: &str) -> Result<(), SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::DeleteChild {
                 id: id.to_string(),
                 reply: reply_tx,
             })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())?
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
     }
 
-    pub async fn count_children(&self) -> Result<ChildCounts, String> {
+    pub async fn count_children(&self) -> Result<ChildCounts, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::CountChildren { reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)
     }
 
-    pub async fn which_children(&self) -> Result<Vec<ChildInfo>, String> {
+    pub async fn which_children(&self) -> Result<Vec<ChildInfo>, SupervisorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.msg_tx
             .send(SupervisorMsg::WhichChildren { reply: reply_tx })
-            .map_err(|_| "supervisor gone".to_string())?;
-        reply_rx.await.map_err(|_| "supervisor gone".to_string())
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)
     }
 }
 
@@ -251,7 +255,7 @@ async fn supervisor_loop(
                     continue;
                 }
 
-                if !state.check_restart_limit() {
+                if !check_restart_limit(&mut state.restart_times, state.max_restarts, state.max_seconds) {
                     shutdown_all_children(&mut state.children).await;
                     break;
                 }
@@ -312,7 +316,7 @@ async fn supervisor_loop(
                         let _ = reply.send(Ok(()));
                     }
                     None => {
-                        let _ = reply.send(Err(format!("child not found: {}", id)));
+                        let _ = reply.send(Err(SupervisorError::NotFound(id)));
                     }
                 }
             }
@@ -320,7 +324,7 @@ async fn supervisor_loop(
                 match state.children.iter().position(|c| c.spec.id == id) {
                     Some(i) => {
                         if state.children[i].pid.is_some() {
-                            let _ = reply.send(Err(format!("child is still running: {}", id)));
+                            let _ = reply.send(Err(SupervisorError::StillRunning(id)));
                         } else {
                             let child_id = state.children[i].spec.id.clone();
                             start_child(&mut state.children[i], &child_id, &msg_tx);
@@ -329,7 +333,7 @@ async fn supervisor_loop(
                         }
                     }
                     None => {
-                        let _ = reply.send(Err(format!("child not found: {}", id)));
+                        let _ = reply.send(Err(SupervisorError::NotFound(id)));
                     }
                 }
             }
@@ -337,14 +341,14 @@ async fn supervisor_loop(
                 match state.children.iter().position(|c| c.spec.id == id) {
                     Some(i) => {
                         if state.children[i].pid.is_some() {
-                            let _ = reply.send(Err(format!("child is still running: {}", id)));
+                            let _ = reply.send(Err(SupervisorError::StillRunning(id)));
                         } else {
                             state.children.remove(i);
                             let _ = reply.send(Ok(()));
                         }
                     }
                     None => {
-                        let _ = reply.send(Err(format!("child not found: {}", id)));
+                        let _ = reply.send(Err(SupervisorError::NotFound(id)));
                     }
                 }
             }
@@ -387,25 +391,6 @@ struct SupervisorState {
     restart_times: VecDeque<Instant>,
 }
 
-impl SupervisorState {
-    fn check_restart_limit(&mut self) -> bool {
-        if self.max_restarts == 0 {
-            return false;
-        }
-        let now = Instant::now();
-        let window = Duration::from_secs(self.max_seconds as u64);
-        self.restart_times.push_back(now);
-        while let Some(&front) = self.restart_times.front() {
-            if now.duration_since(front) > window {
-                self.restart_times.pop_front();
-            } else {
-                break;
-            }
-        }
-        (self.restart_times.len() as u32) <= self.max_restarts
-    }
-}
-
 fn start_child(
     child: &mut ChildState,
     child_id: &str,
@@ -416,8 +401,6 @@ fn start_child(
     let msg_tx = msg_tx.clone();
     let child_id = child_id.to_string();
 
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CHILD_PID_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
     let local_id = CHILD_PID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = ProcessId::new(0, local_id);
 
@@ -443,24 +426,7 @@ fn start_child(
 async fn stop_child(child: &mut ChildState) {
     let shutdown_tx = child.shutdown_tx.take();
     let join_handle = child.join_handle.take();
-
-    match (&child.spec.shutdown, shutdown_tx, join_handle) {
-        (ShutdownStrategy::BrutalKill, _tx, Some(handle)) => {
-            handle.abort();
-            let _ = handle.await;
-        }
-        (ShutdownStrategy::Timeout(duration), Some(tx), Some(handle)) => {
-            let _ = tx.send(());
-            if tokio::time::timeout(*duration, handle).await.is_err() {
-                // Timed out
-            }
-        }
-        (ShutdownStrategy::Infinity, Some(tx), Some(handle)) => {
-            let _ = tx.send(());
-            let _ = handle.await;
-        }
-        _ => {}
-    }
+    shutdown_child_task(&child.spec.shutdown, shutdown_tx, join_handle).await;
     child.pid = None;
 }
 
@@ -475,9 +441,10 @@ async fn shutdown_all_children(children: &mut [ChildState]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::spec::{AutoShutdown, ChildType, RestartType};
+    use crate::supervisor::spec::{AutoShutdown, ChildType, RestartType, ShutdownStrategy};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     fn test_runtime() -> Arc<Runtime> { Arc::new(Runtime::new(1)) }
