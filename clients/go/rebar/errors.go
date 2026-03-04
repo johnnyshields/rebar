@@ -43,7 +43,7 @@ func checkError(rc C.int32_t) error {
 	case errOK:
 		return nil
 	case errNullPtr:
-		panic("rebar: internal error — null pointer passed to FFI")
+		return &RebarError{Code: errNullPtr, Message: "null pointer passed to FFI"}
 	case errSendFailed:
 		return &SendError{RebarError{Code: errSendFailed, Message: "failed to deliver message"}}
 	case errNotFound:

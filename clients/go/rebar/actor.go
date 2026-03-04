@@ -66,15 +66,20 @@ func registerActor(a Actor, r *Runtime) uint64 {
 	return id
 }
 
+func unregisterActor(id uint64) {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	delete(actorMap, id)
+}
+
 // The active actor ID is set before spawning so the C callback can find it.
-// This is safe because rebar_spawn blocks until the callback is invoked.
+// actorMu must be held across both the write and the C spawn call.
 var activeActorID uint64
 
 //export goRebarProcessCallback
 func goRebarProcessCallback(pid C.rebar_pid_t) {
-	actorMu.Lock()
+	// actorMu is held by SpawnActor during this callback.
 	entry, ok := actorMap[activeActorID]
-	actorMu.Unlock()
 	if !ok {
 		return
 	}
