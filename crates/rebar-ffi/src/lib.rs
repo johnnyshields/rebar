@@ -268,7 +268,11 @@ pub extern "C" fn rebar_recv(
             // Extract payload bytes.
             let bytes = match msg.payload() {
                 rmpv::Value::Binary(b) => b.clone(),
-                other => rmpv::encode::to_vec(other).unwrap_or_default(),
+                other => {
+                    let mut buf = Vec::new();
+                    rmpv::encode::write_value(&mut buf, other).unwrap_or_default();
+                    buf
+                }
             };
             let out = Box::into_raw(Box::new(RebarMsg { data: bytes }));
             unsafe {
@@ -300,9 +304,7 @@ pub extern "C" fn rebar_send(rt: *mut RebarRuntime, dest: RebarPid, msg: *const 
     let dest_pid = dest.to_process_id();
     let payload = rmpv::Value::Binary(msg.data.clone());
 
-    let result = rt
-        .tokio_rt
-        .block_on(async { rt.runtime.send(dest_pid, payload).await });
+    let result = rt.runtime.send(dest_pid, payload);
 
     match result {
         Ok(()) => REBAR_OK,
@@ -437,9 +439,7 @@ pub extern "C" fn rebar_send_named(
     let msg_ref = unsafe { &*msg };
     let payload = rmpv::Value::Binary(msg_ref.data.clone());
 
-    let result = rt_ref
-        .tokio_rt
-        .block_on(async { rt_ref.runtime.send(dest_pid, payload).await });
+    let result = rt_ref.runtime.send(dest_pid, payload);
 
     match result {
         Ok(()) => REBAR_OK,

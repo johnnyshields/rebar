@@ -319,7 +319,7 @@ async fn process_monitor_receives_down() {
         let mut detected = false;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            if ctx.send(target, rmpv::Value::Nil).await.is_err() {
+            if ctx.send(target, rmpv::Value::Nil).is_err() {
                 detected = true;
                 break;
             }

@@ -138,6 +138,23 @@ impl ProcessTable {
     pub fn is_empty(&self) -> bool {
         self.processes.is_empty()
     }
+
+    /// Check whether a process is alive (present in the table).
+    pub fn is_alive(&self, pid: &ProcessId) -> bool {
+        self.processes.contains_key(pid)
+    }
+
+    /// Kill a process by removing it from the table.
+    ///
+    /// Returns `true` if the process was found and removed.
+    pub fn kill(&self, pid: &ProcessId) -> bool {
+        self.processes.remove(pid).is_some()
+    }
+
+    /// Return all PIDs currently in the table.
+    pub fn list_pids(&self) -> Vec<ProcessId> {
+        self.processes.iter().map(|entry| *entry.key()).collect()
+    }
 }
 
 #[cfg(test)]

@@ -36,8 +36,32 @@ impl ProcessContext {
     }
 
     /// Send a message to another process by PID.
-    pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
+    pub fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         self.router.route(self.pid, dest, payload)
+    }
+}
+
+/// Options for spawning a process.
+pub struct SpawnOptions {
+    /// If `Some(cap)`, the mailbox is bounded to `cap` messages.
+    /// If `None`, the mailbox is unbounded (default).
+    pub mailbox_capacity: Option<usize>,
+}
+
+impl Default for SpawnOptions {
+    fn default() -> Self {
+        Self {
+            mailbox_capacity: None,
+        }
+    }
+}
+
+impl SpawnOptions {
+    /// Create options for a bounded mailbox with the given capacity.
+    pub fn bounded(capacity: usize) -> Self {
+        Self {
+            mailbox_capacity: Some(capacity),
+        }
     }
 }
 
@@ -83,21 +107,26 @@ impl Runtime {
         self.node_id
     }
 
-    /// Spawn a new process that runs the given async handler.
-    ///
-    /// The handler receives a `ProcessContext` and can use it to send/receive
-    /// messages. Returns the new process's PID.
-    ///
-    /// The spawned task is wrapped so that panics are caught and do not
-    /// crash the runtime. After the handler completes (normally or via panic),
-    /// the process is removed from the process table.
+    /// Spawn a new process with default options (unbounded mailbox).
     pub async fn spawn<F, Fut>(&self, handler: F) -> ProcessId
     where
         F: FnOnce(ProcessContext) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        self.spawn_with_options(handler, SpawnOptions::default()).await
+    }
+
+    /// Spawn a new process with the given options.
+    pub async fn spawn_with_options<F, Fut>(&self, handler: F, options: SpawnOptions) -> ProcessId
+    where
+        F: FnOnce(ProcessContext) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let pid = self.table.allocate_pid();
-        let (tx, rx) = Mailbox::unbounded();
+        let (tx, rx) = match options.mailbox_capacity {
+            Some(cap) => Mailbox::bounded(cap),
+            None => Mailbox::unbounded(),
+        };
 
         let handle = ProcessHandle::new(tx);
         self.table.insert(pid, handle);
@@ -110,14 +139,8 @@ impl Runtime {
 
         let table = Arc::clone(&self.table);
 
-        // Spawn a wrapper task that catches panics via the JoinHandle.
-        // tokio::spawn catches panics in the spawned task and returns
-        // JoinError instead of propagating them, so we spawn the handler
-        // inside an inner task and await its JoinHandle.
         tokio::spawn(async move {
             let inner = tokio::spawn(handler(ctx));
-            // Whether the handler completes normally or panics,
-            // we always clean up by removing from the process table.
             let _ = inner.await;
             table.remove(&pid);
         });
@@ -126,9 +149,7 @@ impl Runtime {
     }
 
     /// Send a message to a process by PID from outside any process context.
-    ///
-    /// Uses a synthetic PID of <node_id, 0> as the sender.
-    pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
+    pub fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, dest, payload)
     }
@@ -154,6 +175,21 @@ impl Runtime {
             .ok_or(SendError::ProcessDead(ProcessId::new(0, 0)))?;
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, pid, payload)
+    }
+
+    /// Check whether a process is alive.
+    pub fn is_alive(&self, pid: &ProcessId) -> bool {
+        self.table.is_alive(pid)
+    }
+
+    /// Kill a process by removing it from the process table.
+    pub fn kill(&self, pid: &ProcessId) -> bool {
+        self.table.kill(pid)
+    }
+
+    /// List all process PIDs currently in the table.
+    pub fn list_processes(&self) -> Vec<ProcessId> {
+        self.table.list_pids()
     }
 }
 
@@ -191,7 +227,6 @@ mod tests {
             .await;
         rt.spawn(move |ctx| async move {
             ctx.send(receiver, rmpv::Value::String("hello".into()))
-                .await
                 .unwrap();
         })
         .await;
@@ -221,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn send_to_dead_process_returns_error() {
         let rt = Runtime::new(1);
-        let result = rt.send(ProcessId::new(1, 999), rmpv::Value::Nil).await;
+        let result = rt.send(ProcessId::new(1, 999), rmpv::Value::Nil);
         assert!(result.is_err());
     }
 
@@ -248,7 +283,6 @@ mod tests {
         rt.spawn(move |mut ctx| async move {
             let me = ctx.self_pid();
             ctx.send(me, rmpv::Value::String("self-msg".into()))
-                .await
                 .unwrap();
             let msg = ctx.recv().await.unwrap();
             done_tx
@@ -278,13 +312,11 @@ mod tests {
                 let msg = ctx.recv().await.unwrap();
                 let val = msg.payload().as_u64().unwrap();
                 ctx.send(c, rmpv::Value::Integer((val + 1).into()))
-                    .await
                     .unwrap();
             })
             .await;
         rt.spawn(move |ctx| async move {
             ctx.send(b, rmpv::Value::Integer(1u64.into()))
-                .await
                 .unwrap();
         })
         .await;
@@ -315,7 +347,6 @@ mod tests {
         rt.spawn(move |ctx| async move {
             for (i, pid) in workers.iter().enumerate() {
                 ctx.send(*pid, rmpv::Value::Integer((i as u64).into()))
-                    .await
                     .unwrap();
             }
         })
@@ -393,7 +424,6 @@ mod tests {
             .await;
         for i in 1..=5u64 {
             rt.send(receiver, rmpv::Value::Integer(i.into()))
-                .await
                 .unwrap();
         }
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
@@ -408,7 +438,7 @@ mod tests {
         let rt = Runtime::new(1);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         rt.spawn(move |ctx| async move {
-            let result = ctx.send(ProcessId::new(1, 999), rmpv::Value::Nil).await;
+            let result = ctx.send(ProcessId::new(1, 999), rmpv::Value::Nil);
             done_tx.send(result.is_err()).unwrap();
         })
         .await;
@@ -461,7 +491,6 @@ mod tests {
 
         rt.spawn(move |ctx| async move {
             ctx.send(receiver, rmpv::Value::String("routed".into()))
-                .await
                 .unwrap();
         })
         .await;
