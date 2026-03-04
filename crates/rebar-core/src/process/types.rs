@@ -82,6 +82,8 @@ pub enum SendError {
     MailboxFull(ProcessId),
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
+    #[error("malformed frame: {0}")]
+    MalformedFrame(String),
 }
 
 #[cfg(test)]
