@@ -51,8 +51,12 @@ TypeInvariant ==
 (* Mirrors Registry::lookup max_by logic                                   *)
 (****************************************************************************)
 
+\* Non-strict >= on node_id handles the edge case where delta merging
+\* creates two entries with identical (ts, node_id) but different tags
+\* (e.g., register at ts=1, unregister, re-register at ts=1 with new tag).
+\* CHOOSE resolves ties deterministically, matching Rust's max_by behavior.
 Beats(a, b) ==
-    a.ts > b.ts \/ (a.ts = b.ts /\ a.node_id > b.node_id)
+    a.ts > b.ts \/ (a.ts = b.ts /\ a.node_id >= b.node_id)
 
 Winner(entries) ==
     CHOOSE e \in entries :
@@ -76,12 +80,12 @@ Init ==
 \* [ACTION] Node n locally registers name with a new tag at timestamp ts.
 \* Generates an Add delta for the pool.
 \* Preconditions:
-\*   - tag not tombstoned at n
-\*   - tag not already present (idempotency)
+\*   - tag globally unused (models UUID v4 uniqueness -- no two registrations
+\*     across any node may share a tag, including tombstoned tags)
 \*   - no existing entry with same (ts, node_id) to ensure Winner is well-defined
 Register(n, name, tg, ts) ==
-    /\ tg \notin tombstones[n]
-    /\ \A e \in reg_entries[n][name] : e.tag # tg
+    /\ \A m \in Nodes : \A nm \in Names : \A e \in reg_entries[m][nm] : e.tag # tg
+    /\ \A m \in Nodes : tg \notin tombstones[m]
     /\ \A e \in reg_entries[n][name] : ~(e.ts = ts /\ e.node_id = n)
     /\ reg_entries' = [reg_entries EXCEPT
             ![n][name] = reg_entries[n][name] \union {EntryOf(tg, ts, n)}]

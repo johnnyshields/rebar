@@ -274,7 +274,6 @@ if [[ "$RECOVER_MODE" == "true" ]]; then
     fi
 
     cd "$SCRIPT_DIR"
-    configure_tlc_resources
 
     echo "Resuming TLC from checkpoint: $CHECKPOINT_DIR"
     echo "Model: $RECOVER_MODEL"
@@ -282,13 +281,12 @@ if [[ "$RECOVER_MODE" == "true" ]]; then
 
     java -XX:+UseParallelGC \
          -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapDiskFPSet \
-         $HEAP \
          -jar "$TLC_JAR" \
          -config "$(ls ${RECOVER_MODEL}.cfg ${RECOVER_MODEL}-*.cfg 2>/dev/null | head -1)" \
          -recover "$CHECKPOINT_DIR" \
          -metadir "$TMP_DIR" \
          -lncheck final \
-         $WORKERS \
+         -workers auto \
          "MC${RECOVER_MODEL}.tla"
 
     exit $?
@@ -323,22 +321,6 @@ fi
 # Track failures
 FAILED_RUNS=()
 
-configure_tlc_resources() {
-    if [[ -f /proc/meminfo ]]; then
-        TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-        TOTAL_MEM_GB=$((TOTAL_MEM_KB / 1024 / 1024))
-    elif command -v sysctl &> /dev/null; then
-        TOTAL_MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-        TOTAL_MEM_GB=$((TOTAL_MEM_BYTES / 1024 / 1024 / 1024))
-    else
-        TOTAL_MEM_GB=8
-    fi
-    HEAP_GB=$((TOTAL_MEM_GB * 75 / 100))
-    [[ $HEAP_GB -lt 4 ]] && HEAP_GB=4
-    HEAP="-Xmx${HEAP_GB}g"
-    WORKERS="-workers auto"
-}
-
 run_sanity() {
     local spec_name="$1"
     local cfg_file="$2"
@@ -357,7 +339,6 @@ run_sanity() {
 
     local OUTPUT
     OUTPUT=$(timeout "${TIMEOUT}s" java -XX:+UseParallelGC \
-         -Xmx4g \
          -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapDiskFPSet \
          -jar "$TLC_JAR" \
          -config "$cfg_file" \
@@ -414,18 +395,15 @@ run_model() {
     echo "[$run_id] Running TLC model checker..."
     echo ""
 
-    configure_tlc_resources
-
     local TLC_OUTPUT
     TLC_OUTPUT=$(java -XX:+UseParallelGC \
          -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapDiskFPSet \
-         $HEAP \
          -jar "$TLC_JAR" \
          -config "$cfg_file" \
          -metadir "$TMP_DIR" \
          -lncheck final \
          -cleanup \
-         $WORKERS \
+         -workers auto \
          "$mc_file" 2>&1 | tee /dev/stderr)
     local TLC_EXIT=${PIPESTATUS[0]}
 

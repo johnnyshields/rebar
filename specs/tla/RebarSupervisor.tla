@@ -63,9 +63,11 @@ TypeInvariant ==
 (* Helper operators                                                         *)
 (****************************************************************************)
 
-\* True if we are under the restart limit
-\* Mirrors: (restart_times.len() as u32) <= self.max_restarts
-UnderRestartLimit == restart_count <= MaxRestarts
+\* True if we are under the restart limit.
+\* Rust checks AFTER pushing: (restart_times.len() as u32) <= self.max_restarts
+\* TLA+ checks BEFORE incrementing, so we use strict < to match:
+\*   Rust: push, len=N+1, N+1 <= max  <==>  TLA+: count=N, N < max, then count'=N+1
+UnderRestartLimit == restart_count < MaxRestarts
 
 \* Children with index strictly greater than i (for RestForOne successors)
 SuccessorsOf(i) ==
@@ -271,6 +273,7 @@ Fairness ==
     /\ WF_vars(SupervisorProcessesRestForOne)
     /\ WF_vars(SupervisorProcessesStaleExit)
     /\ WF_vars(SupervisorProcessesNormalExit)
+    /\ WF_vars(SupervisorEscalates)
     /\ WF_vars(\E e \in pending_exits : DeliverExitToSupervisor(e))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -287,12 +290,14 @@ NoDoubleLiveChild ==
     \A i \in Children :
         child_status[i] = "running" => child_pid[i] # None
 
-\* A stale exit (PID mismatch) must be a no-op: child_pid and child_status
-\* remain unchanged. This is an action property verifying that processing a
-\* stale exit does not alter any child's state.
+\* When the supervisor dequeues a stale exit (PID mismatch), child_pid and
+\* child_status must remain unchanged. The guard `sup_queue' = Tail(sup_queue)`
+\* restricts this to steps that actually consume the queue head, so unrelated
+\* actions (e.g., a child exiting naturally) don't trigger the property.
 \* Bug hunted: without the PID guard, stale exits trigger spurious restarts.
 StaleExitSafety ==
-    [][Len(sup_queue) > 0 /\ child_pid[Head(sup_queue).index] # Head(sup_queue).pid
+    [][Len(sup_queue) > 0 /\ sup_queue' = Tail(sup_queue) /\
+       child_pid[Head(sup_queue).index] # Head(sup_queue).pid
        => child_pid' = child_pid /\ child_status' = child_status]_vars
 
 \* No two distinct children share the same non-None PID.
