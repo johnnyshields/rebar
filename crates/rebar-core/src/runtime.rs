@@ -1,9 +1,10 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::events::{EventBus, LifecycleEvent};
 use crate::process::mailbox::{Mailbox, MailboxRx};
-use crate::process::table::{ProcessHandle, ProcessTable};
-use crate::process::{Message, ProcessId, SendError};
+use crate::process::table::{ProcessHandle, ProcessMeta, ProcessTable};
+use crate::process::{ExitReason, Message, ProcessId, SendError};
 use crate::router::{LocalRouter, MessageRouter};
 
 /// Context provided to each spawned process, giving it access to its own
@@ -46,6 +47,7 @@ pub struct Runtime {
     node_id: u64,
     table: Arc<ProcessTable>,
     router: Arc<dyn MessageRouter>,
+    event_bus: Option<EventBus>,
 }
 
 impl Runtime {
@@ -57,6 +59,7 @@ impl Runtime {
             node_id,
             table,
             router,
+            event_bus: None,
         }
     }
 
@@ -70,7 +73,19 @@ impl Runtime {
             node_id,
             table,
             router,
+            event_bus: None,
         }
+    }
+
+    /// Attach an event bus for lifecycle event emission.
+    pub fn with_event_bus(mut self, bus: EventBus) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// Return a reference to the event bus, if one is attached.
+    pub fn event_bus(&self) -> Option<&EventBus> {
+        self.event_bus.as_ref()
     }
 
     /// Return a reference to the process table.
@@ -96,11 +111,49 @@ impl Runtime {
         F: FnOnce(ProcessContext) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        self.spawn_inner(handler, ProcessMeta::default()).await
+    }
+
+    /// Spawn a named process with parent tracking.
+    pub async fn spawn_named<F, Fut>(
+        &self,
+        name: impl Into<String>,
+        parent: Option<ProcessId>,
+        handler: F,
+    ) -> ProcessId
+    where
+        F: FnOnce(ProcessContext) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let meta = ProcessMeta {
+            name: Some(name.into()),
+            parent,
+            ..ProcessMeta::default()
+        };
+        self.spawn_inner(handler, meta).await
+    }
+
+    async fn spawn_inner<F, Fut>(&self, handler: F, meta: ProcessMeta) -> ProcessId
+    where
+        F: FnOnce(ProcessContext) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let pid = self.table.allocate_pid();
         let (tx, rx) = Mailbox::unbounded();
 
-        let handle = ProcessHandle::new(tx);
+        let name = meta.name.clone();
+        let parent = meta.parent;
+        let handle = ProcessHandle::with_meta(tx, meta);
         self.table.insert(pid, handle);
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(LifecycleEvent::ProcessSpawned {
+                pid,
+                parent,
+                name,
+                timestamp: LifecycleEvent::now(),
+            });
+        }
 
         let ctx = ProcessContext {
             pid,
@@ -109,17 +162,24 @@ impl Runtime {
         };
 
         let table = Arc::clone(&self.table);
+        let bus = self.event_bus.clone();
 
-        // Spawn a wrapper task that catches panics via the JoinHandle.
-        // tokio::spawn catches panics in the spawned task and returns
-        // JoinError instead of propagating them, so we spawn the handler
-        // inside an inner task and await its JoinHandle.
         tokio::spawn(async move {
             let inner = tokio::spawn(handler(ctx));
-            // Whether the handler completes normally or panics,
-            // we always clean up by removing from the process table.
-            let _ = inner.await;
+            let result = inner.await;
             table.remove(&pid);
+
+            if let Some(bus) = bus {
+                let reason = match result {
+                    Ok(()) => ExitReason::Normal,
+                    Err(_) => ExitReason::Abnormal("panic".into()),
+                };
+                bus.emit(LifecycleEvent::ProcessExited {
+                    pid,
+                    reason,
+                    timestamp: LifecycleEvent::now(),
+                });
+            }
         });
 
         pid
