@@ -86,6 +86,17 @@ func (r *Runtime) SendNamed(name string, data []byte) error {
 	return checkError(rc)
 }
 
+// Unregister removes a name from the runtime's registry.
+func (r *Runtime) Unregister(name string) error {
+	nameBytes := []byte(name)
+	rc := C.rebar_unregister(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&nameBytes[0])),
+		C.size_t(len(nameBytes)),
+	)
+	return checkError(rc)
+}
+
 // SpawnActor spawns a new process backed by the given Actor.
 // The actor's HandleMessage is called with a nil message on startup
 // (as a lifecycle hook), and the process PID is returned.

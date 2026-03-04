@@ -203,9 +203,7 @@ pub extern "C" fn rebar_send(rt: *mut RebarRuntime, dest: RebarPid, msg: *const 
     let dest_pid = dest.to_process_id();
     let payload = rmpv::Value::Binary(msg.data.clone());
 
-    let result = rt
-        .tokio_rt
-        .block_on(async { rt.runtime.send(dest_pid, payload).await });
+    let result = rt.runtime.send(dest_pid, payload);
 
     match result {
         Ok(()) => REBAR_OK,
@@ -310,9 +308,7 @@ pub extern "C" fn rebar_send_named(
     let msg_ref = unsafe { &*msg };
     let payload = rmpv::Value::Binary(msg_ref.data.clone());
 
-    let result = rt_ref
-        .tokio_rt
-        .block_on(async { rt_ref.runtime.send(dest_pid, payload).await });
+    let result = rt_ref.runtime.send(dest_pid, payload);
 
     match result {
         Ok(()) => REBAR_OK,
@@ -566,13 +562,20 @@ mod tests {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        let name = b"my_service";
-        let pid = RebarPid {
-            node_id: 1,
-            local_id: 42,
-        };
+        // Spawn a process so the PID exists in the table.
+        extern "C" fn idle_callback(_pid: RebarPid) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
 
-        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid);
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        let rc = rebar_spawn(rt, Some(idle_callback), &mut pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        let name = b"my_service";
+        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
         assert_eq!(rc, REBAR_OK);
 
         let mut found = RebarPid {
@@ -581,8 +584,8 @@ mod tests {
         };
         let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found);
         assert_eq!(rc, REBAR_OK);
-        assert_eq!(found.node_id, 1);
-        assert_eq!(found.local_id, 42);
+        assert_eq!(found.node_id, pid_out.node_id);
+        assert_eq!(found.local_id, pid_out.local_id);
 
         rebar_runtime_free(rt);
     }
