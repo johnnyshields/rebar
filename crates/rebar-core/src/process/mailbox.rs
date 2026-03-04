@@ -104,6 +104,23 @@ impl MailboxTx {
         }
     }
 
+    /// Send a message, waiting for space if the mailbox is bounded and full.
+    ///
+    /// Unlike `send()`, which returns `MailboxFull` immediately when a bounded
+    /// mailbox is at capacity, this method awaits until space is available.
+    pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
+        match &self.inner {
+            TxInner::Unbounded(tx) => {
+                let from = msg.from();
+                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
+            }
+            TxInner::Bounded(tx) => {
+                let from = msg.from();
+                tx.send(msg).await.map_err(|_| SendError::ProcessDead(from))
+            }
+        }
+    }
+
     /// Try to send a message without blocking.
     ///
     /// For unbounded channels, behaves the same as `send`.
@@ -301,5 +318,52 @@ mod tests {
             Err(SendError::MailboxFull(_)) => {}
             other => panic!("expected MailboxFull, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn send_async_waits_for_space() {
+        let (tx, mut rx) = Mailbox::bounded(1);
+        let pid = ProcessId::new(0, 1);
+
+        // Fill the mailbox
+        let msg1 = Message::new(pid, rmpv::Value::from(1));
+        tx.send(msg1).unwrap();
+
+        // Regular send should fail (mailbox full)
+        let msg2 = Message::new(pid, rmpv::Value::from(2));
+        assert!(matches!(tx.send(msg2), Err(SendError::MailboxFull(_))));
+
+        // send_async should wait, then succeed when space is made
+        let tx_clone = tx.clone();
+        let handle = tokio::spawn(async move {
+            let msg3 = Message::new(pid, rmpv::Value::from(3));
+            tx_clone.send_async(msg3).await.unwrap();
+        });
+
+        // Give the sender a moment to start waiting
+        tokio::task::yield_now().await;
+
+        // Consume a message to make space
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(1));
+
+        // The send_async should now complete
+        handle.await.unwrap();
+
+        // Verify the async-sent message is in the mailbox
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn send_async_unbounded_works() {
+        let (tx, mut rx) = Mailbox::unbounded();
+        let pid = ProcessId::new(0, 1);
+
+        let msg = Message::new(pid, rmpv::Value::from(42));
+        tx.send_async(msg).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(42));
     }
 }

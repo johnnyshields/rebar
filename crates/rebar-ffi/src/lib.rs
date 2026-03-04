@@ -237,7 +237,7 @@ pub extern "C" fn rebar_register(
         Ok(s) => s.to_owned(),
         Err(_) => return REBAR_ERR_INVALID_NAME,
     };
-    let mut reg = rt.registry.lock().unwrap();
+    let mut reg = rt.registry.lock().unwrap_or_else(|e| e.into_inner());
     reg.insert(name_str, pid.to_process_id());
     REBAR_OK
 }
@@ -263,7 +263,7 @@ pub extern "C" fn rebar_whereis(
         Ok(s) => s,
         Err(_) => return REBAR_ERR_INVALID_NAME,
     };
-    let reg = rt.registry.lock().unwrap();
+    let reg = rt.registry.lock().unwrap_or_else(|e| e.into_inner());
     match reg.get(name_str) {
         Some(pid) => {
             unsafe {
@@ -300,7 +300,7 @@ pub extern "C" fn rebar_send_named(
     };
 
     let dest_pid = {
-        let reg = rt_ref.registry.lock().unwrap();
+        let reg = rt_ref.registry.lock().unwrap_or_else(|e| e.into_inner());
         match reg.get(name_str) {
             Some(pid) => *pid,
             None => return REBAR_ERR_NOT_FOUND,
@@ -641,5 +641,31 @@ mod tests {
         assert_eq!(rc, REBAR_ERR_NOT_FOUND);
 
         rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. mutex_poison_recovery
+    // -----------------------------------------------------------------------
+    #[test]
+    fn mutex_poison_recovery() {
+        let registry: Mutex<HashMap<String, rebar_core::process::ProcessId>> =
+            Mutex::new(HashMap::new());
+
+        // Poison the mutex by panicking while holding the lock
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut guard = registry.lock().unwrap();
+            guard.insert("test".to_string(), rebar_core::process::ProcessId::new(0, 1));
+            panic!("intentional panic to poison mutex");
+        }));
+
+        // Verify the mutex is poisoned
+        assert!(registry.lock().is_err());
+
+        // Verify recovery works
+        let guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            guard.get("test"),
+            Some(&rebar_core::process::ProcessId::new(0, 1))
+        );
     }
 }
