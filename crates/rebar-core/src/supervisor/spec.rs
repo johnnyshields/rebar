@@ -1,14 +1,14 @@
 use crate::process::ExitReason;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum RestartStrategy {
     OneForOne,
     OneForAll,
     RestForOne,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum RestartType {
     Permanent,
     Transient,
@@ -25,7 +25,7 @@ impl RestartType {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub enum ShutdownStrategy {
     Timeout(Duration),
     BrutalKill,

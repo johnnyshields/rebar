@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessId {
     node_id: u64,
     local_id: u64,
@@ -60,7 +60,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub enum ExitReason {
     Normal,
     Abnormal(String),

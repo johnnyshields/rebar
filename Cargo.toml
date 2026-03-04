@@ -5,8 +5,6 @@ members = [
     "crates/rebar-cluster",
     "crates/rebar",
     "crates/rebar-ffi",
-    "crates/rebar-watcher-web",
-    "crates/rebar-watcher-tui",
 ]
 exclude = ["bench/rebar", "bench/actix"]
 
