@@ -30,6 +30,22 @@ export class InvalidNameError extends RebarError {
   }
 }
 
+/** Raised when a recv operation times out. */
+export class TimeoutError extends RebarError {
+  constructor() {
+    super(-5, "recv timed out");
+    this.name = "TimeoutError";
+  }
+}
+
+/** Raised when a name is already registered. */
+export class AlreadyRegisteredError extends RebarError {
+  constructor() {
+    super(-6, "name already registered");
+    this.name = "AlreadyRegisteredError";
+  }
+}
+
 export function checkError(rc: number): void {
   switch (rc) {
     case 0:
@@ -42,6 +58,10 @@ export function checkError(rc: number): void {
       throw new NotFoundError();
     case -4:
       throw new InvalidNameError();
+    case -5:
+      throw new TimeoutError();
+    case -6:
+      throw new AlreadyRegisteredError();
     default:
       throw new RebarError(rc, "unknown error");
   }

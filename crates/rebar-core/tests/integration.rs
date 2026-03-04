@@ -34,7 +34,6 @@ async fn ping_pong_between_processes() {
             // Reply with "pong" to the sender.
             let sender = msg.from();
             ctx.send(sender, rmpv::Value::String("pong".into()))
-                .await
                 .unwrap();
         })
         .await;
@@ -45,7 +44,6 @@ async fn ping_pong_between_processes() {
         // send ping — we cannot send self-pid as payload directly, but B
         // can read `msg.from()`.
         ctx.send(b_pid, rmpv::Value::String("ping".into()))
-            .await
             .unwrap();
         // Wait for the pong reply.
         let reply = ctx.recv().await.unwrap();
@@ -95,7 +93,6 @@ async fn fan_out_to_multiple_workers() {
     rt.spawn(move |ctx: ProcessContext| async move {
         for (i, pid) in worker_pids.iter().enumerate() {
             ctx.send(*pid, rmpv::Value::Integer((i as u64).into()))
-                .await
                 .unwrap();
         }
     })
@@ -137,7 +134,6 @@ async fn chain_of_three_processes() {
             let msg = ctx.recv().await.unwrap();
             let val = msg.payload().as_u64().unwrap();
             ctx.send(c, rmpv::Value::Integer((val + 10).into()))
-                .await
                 .unwrap();
         })
         .await;
@@ -145,7 +141,6 @@ async fn chain_of_three_processes() {
     // A — starts the chain with value 5.
     rt.spawn(move |ctx: ProcessContext| async move {
         ctx.send(b, rmpv::Value::Integer(5u64.into()))
-            .await
             .unwrap();
     })
     .await;
@@ -319,7 +314,7 @@ async fn process_monitor_receives_down() {
         let mut detected = false;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            if ctx.send(target, rmpv::Value::Nil).await.is_err() {
+            if ctx.send(target, rmpv::Value::Nil).is_err() {
                 detected = true;
                 break;
             }

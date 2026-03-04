@@ -130,7 +130,6 @@ mod tests {
         drt.runtime()
             .spawn(move |ctx| async move {
                 ctx.send(receiver, rmpv::Value::String("local".into()))
-                    .await
                     .unwrap();
             })
             .await;

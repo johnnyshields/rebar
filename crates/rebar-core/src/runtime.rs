@@ -58,12 +58,7 @@ impl ProcessContext {
         &mut self,
     ) -> Option<(ProcessId, T)> {
         let msg = self.recv().await?;
-        match msg.payload() {
-            rmpv::Value::Binary(bytes) => {
-                rmp_serde::from_slice(bytes).ok().map(|val| (msg.from(), val))
-            }
-            _ => None,
-        }
+        msg.deserialize::<T>().map(|val| (msg.from(), val))
     }
 
     /// Receive a typed message with a timeout.
@@ -72,12 +67,7 @@ impl ProcessContext {
         duration: std::time::Duration,
     ) -> Option<(ProcessId, T)> {
         let msg = self.recv_timeout(duration).await?;
-        match msg.payload() {
-            rmpv::Value::Binary(bytes) => {
-                rmp_serde::from_slice(bytes).ok().map(|val| (msg.from(), val))
-            }
-            _ => None,
-        }
+        msg.deserialize::<T>().map(|val| (msg.from(), val))
     }
 }
 
@@ -242,7 +232,7 @@ impl Runtime {
     /// Send a message to a named process.
     pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
         let pid = self.table.whereis(name)
-            .ok_or(SendError::ProcessDead(ProcessId::new(0, 0)))?;
+            .ok_or_else(|| SendError::NameNotFound(name.to_owned()))?;
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, pid, payload)
     }
@@ -567,5 +557,191 @@ mod tests {
             .unwrap();
         assert_eq!(result, "routed");
         assert!(counter_ref.count.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn send_typed_recv_typed_roundtrip() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let receiver = rt
+            .spawn(move |mut ctx| async move {
+                let (from, val): (ProcessId, (String, u32)) = ctx.recv_typed().await.unwrap();
+                done_tx.send((from, val)).unwrap();
+            })
+            .await;
+
+        rt.spawn(move |ctx| async move {
+            ctx.send_typed(receiver, &("hello".to_string(), 42u32))
+                .unwrap();
+        })
+        .await;
+
+        let (from, val) = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, ("hello".to_string(), 42u32));
+        assert!(from.local_id() > 0);
+    }
+
+    #[tokio::test]
+    async fn recv_typed_timeout_succeeds() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let receiver = rt
+            .spawn(move |mut ctx| async move {
+                let result: Option<(ProcessId, String)> = ctx
+                    .recv_typed_timeout(std::time::Duration::from_secs(1))
+                    .await;
+                done_tx.send(result.unwrap().1).unwrap();
+            })
+            .await;
+
+        rt.send_typed(receiver, &"typed-timeout".to_string()).unwrap();
+
+        let val = tokio::time::timeout(std::time::Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, "typed-timeout");
+    }
+
+    #[tokio::test]
+    async fn recv_typed_non_binary_returns_none() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let receiver = rt
+            .spawn(move |mut ctx| async move {
+                let result: Option<(ProcessId, String)> = ctx.recv_typed().await;
+                done_tx.send(result.is_none()).unwrap();
+            })
+            .await;
+
+        // Send a non-binary payload
+        rt.send(receiver, rmpv::Value::String("not binary".into())).unwrap();
+
+        let was_none = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(was_none);
+    }
+
+    #[tokio::test]
+    async fn spawn_with_bounded_mailbox() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let receiver = rt
+            .spawn_with_options(
+                move |mut ctx| async move {
+                    // Drain all messages
+                    let mut count = 0;
+                    while ctx.recv_timeout(std::time::Duration::from_millis(200)).await.is_some() {
+                        count += 1;
+                    }
+                    done_tx.send(count).unwrap();
+                },
+                SpawnOptions::bounded(2),
+            )
+            .await;
+
+        // Send 3 messages to a bounded(2) mailbox — third should fail
+        let r1 = rt.send(receiver, rmpv::Value::Integer(1u64.into()));
+        let r2 = rt.send(receiver, rmpv::Value::Integer(2u64.into()));
+        let r3 = rt.send(receiver, rmpv::Value::Integer(3u64.into()));
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        assert!(matches!(r3, Err(SendError::MailboxFull(_))));
+
+        let count = tokio::time::timeout(std::time::Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn register_whereis_unregister() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            ctx.recv().await;
+        }).await;
+
+        rt.register("test_service".to_string(), pid).unwrap();
+        assert_eq!(rt.whereis("test_service"), Some(pid));
+
+        let removed = rt.unregister("test_service").unwrap();
+        assert_eq!(removed, pid);
+        assert_eq!(rt.whereis("test_service"), None);
+    }
+
+    #[tokio::test]
+    async fn register_duplicate_name_fails() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            ctx.recv().await;
+        }).await;
+
+        rt.register("dup".to_string(), pid).unwrap();
+        let err = rt.register("dup".to_string(), pid);
+        assert!(matches!(err, Err(RegistryError::NameAlreadyRegistered(_))));
+    }
+
+    #[tokio::test]
+    async fn send_named_delivers_message() {
+        let rt = Runtime::new(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt
+            .spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                done_tx.send(msg.payload().clone()).unwrap();
+            })
+            .await;
+
+        rt.register("named_svc".to_string(), pid).unwrap();
+        rt.send_named("named_svc", rmpv::Value::String("via-name".into())).unwrap();
+
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payload, rmpv::Value::String("via-name".into()));
+    }
+
+    #[tokio::test]
+    async fn send_named_unknown_name_returns_error() {
+        let rt = Runtime::new(1);
+        let result = rt.send_named("nonexistent", rmpv::Value::Nil);
+        assert!(matches!(result, Err(SendError::NameNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn is_alive_and_kill() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            ctx.recv().await;
+        }).await;
+
+        assert!(rt.is_alive(pid));
+        assert!(rt.kill(pid));
+        // Give the task time to clean up
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!rt.is_alive(pid));
+    }
+
+    #[tokio::test]
+    async fn list_processes() {
+        let rt = Runtime::new(1);
+        let pid1 = rt.spawn(|mut ctx| async move { ctx.recv().await; }).await;
+        let pid2 = rt.spawn(|mut ctx| async move { ctx.recv().await; }).await;
+
+        let pids = rt.list_processes();
+        assert!(pids.contains(&pid1));
+        assert!(pids.contains(&pid2));
     }
 }

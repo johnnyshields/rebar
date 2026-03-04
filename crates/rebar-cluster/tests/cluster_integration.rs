@@ -566,7 +566,6 @@ async fn end_to_end_cross_node_send_via_tcp() {
 
     // Node 1: send message to receiver_pid on node 2
     rt1.send(receiver_pid, rmpv::Value::String("cross-node-hello".into()))
-        .await
         .unwrap();
 
     // Node 1: process the outbound message (drain remote_rx1 → connection_manager)

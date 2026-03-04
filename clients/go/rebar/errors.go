@@ -6,11 +6,13 @@ import "fmt"
 
 // Error codes from rebar-ffi.
 const (
-	errOK          = 0
-	errNullPtr     = -1
-	errSendFailed  = -2
-	errNotFound    = -3
-	errInvalidName = -4
+	errOK                = 0
+	errNullPtr           = -1
+	errSendFailed        = -2
+	errNotFound          = -3
+	errInvalidName       = -4
+	errTimeout           = -5
+	errAlreadyRegistered = -6
 )
 
 // RebarError represents an error returned by the Rebar FFI.
@@ -38,6 +40,16 @@ type InvalidNameError struct {
 	RebarError
 }
 
+// TimeoutError is returned when a recv operation times out.
+type TimeoutError struct {
+	RebarError
+}
+
+// AlreadyRegisteredError is returned when a name is already registered.
+type AlreadyRegisteredError struct {
+	RebarError
+}
+
 func checkError(rc C.int32_t) error {
 	switch int(rc) {
 	case errOK:
@@ -50,6 +62,10 @@ func checkError(rc C.int32_t) error {
 		return &NotFoundError{RebarError{Code: errNotFound, Message: "name not found in registry"}}
 	case errInvalidName:
 		return &InvalidNameError{RebarError{Code: errInvalidName, Message: "name is not valid UTF-8"}}
+	case errTimeout:
+		return &TimeoutError{RebarError{Code: errTimeout, Message: "recv timed out"}}
+	case errAlreadyRegistered:
+		return &AlreadyRegisteredError{RebarError{Code: errAlreadyRegistered, Message: "name already registered"}}
 	default:
 		return &RebarError{Code: int(rc), Message: "unknown error"}
 	}

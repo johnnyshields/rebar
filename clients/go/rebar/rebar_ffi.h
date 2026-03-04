@@ -21,6 +21,7 @@ typedef struct rebar_runtime_t rebar_runtime_t;
 #define REBAR_ERR_NOT_FOUND  -3
 #define REBAR_ERR_INVALID_NAME -4
 #define REBAR_ERR_TIMEOUT    -5
+#define REBAR_ERR_ALREADY_REGISTERED -6
 
 /* Message API */
 rebar_msg_t *rebar_msg_create(const uint8_t *data, size_t len);

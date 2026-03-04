@@ -30,6 +30,20 @@ class InvalidNameError(RebarError):
         super().__init__(-4, "name is not valid UTF-8")
 
 
+class TimeoutError(RebarError):
+    """Raised when a recv operation times out."""
+
+    def __init__(self):
+        super().__init__(-5, "recv timed out")
+
+
+class AlreadyRegisteredError(RebarError):
+    """Raised when a name is already registered."""
+
+    def __init__(self):
+        super().__init__(-6, "name already registered")
+
+
 def check_error(rc: int) -> None:
     """Raise an appropriate exception for non-zero FFI return codes."""
     if rc == 0:
@@ -42,4 +56,8 @@ def check_error(rc: int) -> None:
         raise NotFoundError()
     if rc == -4:
         raise InvalidNameError()
+    if rc == -5:
+        raise TimeoutError()
+    if rc == -6:
+        raise AlreadyRegisteredError()
     raise RebarError(rc, "unknown error")

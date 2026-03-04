@@ -93,6 +93,8 @@ pub enum SendError {
     NodeUnreachable(u64),
     #[error("serialization error: {0}")]
     SerializationError(String),
+    #[error("name not found: {0}")]
+    NameNotFound(String),
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

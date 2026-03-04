@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rebar_core::process::mailbox::{Mailbox, MailboxRx};
 use rebar_core::process::table::ProcessHandle;
-use rebar_core::process::ProcessId;
+use rebar_core::process::{ProcessId, RegistryError};
 use rebar_core::runtime::Runtime;
 
 // ---------------------------------------------------------------------------
@@ -43,8 +43,9 @@ pub struct RebarRuntime {
     tokio_rt: tokio::runtime::Runtime,
     runtime: Runtime,
     /// Mailboxes for FFI-spawned processes, keyed by PID.
-    /// The MailboxRx is stored here so FFI code can poll it via `rebar_recv`.
-    mailboxes: Mutex<HashMap<ProcessId, MailboxRx>>,
+    /// Each MailboxRx is behind its own Mutex so concurrent recv on the same
+    /// PID blocks instead of returning NOT_FOUND.
+    mailboxes: Mutex<HashMap<ProcessId, Arc<Mutex<MailboxRx>>>>,
     /// Shutdown senders for FFI-spawned processes.
     /// Dropping or sending on these signals the keep-alive task to exit.
     stop_senders: Mutex<HashMap<ProcessId, tokio::sync::oneshot::Sender<()>>>,
@@ -60,6 +61,7 @@ const REBAR_ERR_SEND_FAILED: i32 = -2;
 const REBAR_ERR_NOT_FOUND: i32 = -3;
 const REBAR_ERR_INVALID_NAME: i32 = -4;
 const REBAR_ERR_TIMEOUT: i32 = -5;
+const REBAR_ERR_ALREADY_REGISTERED: i32 = -6;
 
 // ---------------------------------------------------------------------------
 // Message functions
@@ -193,7 +195,7 @@ pub extern "C" fn rebar_spawn(
     // Store the mailbox receiver for rebar_recv
     {
         let mut mailboxes = rt.mailboxes.lock().unwrap();
-        mailboxes.insert(pid, rx);
+        mailboxes.insert(pid, Arc::new(Mutex::new(rx)));
     }
 
     // Create a oneshot channel to keep the process "alive" in the table.
@@ -251,16 +253,18 @@ pub extern "C" fn rebar_recv(
     let rt = unsafe { &*rt };
     let process_id = pid.to_process_id();
 
-    // We need mutable access to the MailboxRx, so we take it out of the map,
-    // do the recv, then put it back.
-    let mut rx = {
-        let mut mailboxes = rt.mailboxes.lock().unwrap();
-        match mailboxes.remove(&process_id) {
-            Some(rx) => rx,
+    // Get a clone of the Arc<Mutex<MailboxRx>> so we can release the map lock
+    // before blocking on recv. This allows concurrent recv on different PIDs
+    // and serializes concurrent recv on the same PID via the per-PID mutex.
+    let rx_arc = {
+        let mailboxes = rt.mailboxes.lock().unwrap();
+        match mailboxes.get(&process_id) {
+            Some(rx) => Arc::clone(rx),
             None => return REBAR_ERR_NOT_FOUND,
         }
     };
 
+    let mut rx = rx_arc.lock().unwrap();
     let result = rt.tokio_rt.block_on(async {
         if timeout_ms < 0 {
             rx.recv().await
@@ -271,12 +275,6 @@ pub extern "C" fn rebar_recv(
                 .await
         }
     });
-
-    // Put the MailboxRx back
-    {
-        let mut mailboxes = rt.mailboxes.lock().unwrap();
-        mailboxes.insert(process_id, rx);
-    }
 
     match result {
         Some(msg) => {
@@ -392,6 +390,8 @@ pub extern "C" fn rebar_register(
     };
     match rt.runtime.register(name_str, pid.to_process_id()) {
         Ok(()) => REBAR_OK,
+        Err(RegistryError::NameAlreadyRegistered(_)) => REBAR_ERR_ALREADY_REGISTERED,
+        Err(RegistryError::ProcessNotFound(_)) => REBAR_ERR_NOT_FOUND,
         Err(_) => REBAR_ERR_NOT_FOUND,
     }
 }
