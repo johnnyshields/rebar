@@ -74,7 +74,7 @@ impl ExitReason {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SendError {
     #[error("process dead: {0}")]
     ProcessDead(ProcessId),
@@ -82,6 +82,16 @@ pub enum SendError {
     MailboxFull(ProcessId),
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RegistryError {
+    #[error("name already registered: {0}")]
+    NameAlreadyRegistered(String),
+    #[error("process not found: {0}")]
+    ProcessNotFound(ProcessId),
+    #[error("name not found: {0}")]
+    NameNotFound(String),
 }
 
 #[cfg(test)]

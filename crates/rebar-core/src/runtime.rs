@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::process::mailbox::{Mailbox, MailboxRx};
 use crate::process::table::{ProcessHandle, ProcessTable};
-use crate::process::{Message, ProcessId, SendError};
+use crate::process::{Message, ProcessId, RegistryError, SendError};
 use crate::router::{LocalRouter, MessageRouter};
 
 /// Context provided to each spawned process, giving it access to its own
@@ -131,6 +131,29 @@ impl Runtime {
     pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, dest, payload)
+    }
+
+    /// Register a name for a process.
+    pub fn register(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
+        self.table.register_name(name, pid)
+    }
+
+    /// Unregister a name, returning the PID it was associated with.
+    pub fn unregister(&self, name: &str) -> Result<ProcessId, RegistryError> {
+        self.table.unregister_name(name)
+    }
+
+    /// Look up a PID by its registered name.
+    pub fn whereis(&self, name: &str) -> Option<ProcessId> {
+        self.table.whereis(name)
+    }
+
+    /// Send a message to a named process.
+    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
+        let pid = self.table.whereis(name)
+            .ok_or(SendError::ProcessDead(ProcessId::new(0, 0)))?;
+        let from = ProcessId::new(self.node_id, 0);
+        self.router.route(from, pid, payload)
     }
 }
 
