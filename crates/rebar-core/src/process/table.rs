@@ -1,10 +1,42 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use serde::Serialize;
 
 use crate::process::mailbox::MailboxTx;
 use crate::process::{Message, ProcessId, SendError};
+
+/// Metadata attached to a process entry.
+#[derive(Debug, Clone)]
+pub struct ProcessMeta {
+    pub name: Option<String>,
+    pub parent: Option<ProcessId>,
+    pub spawned_at: Instant,
+    pub is_supervisor: bool,
+}
+
+impl Default for ProcessMeta {
+    fn default() -> Self {
+        Self {
+            name: None,
+            parent: None,
+            spawned_at: Instant::now(),
+            is_supervisor: false,
+        }
+    }
+}
+
+/// Snapshot of a single process for observability.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessInfo {
+    pub pid: ProcessId,
+    pub name: Option<String>,
+    pub parent: Option<ProcessId>,
+    pub uptime_ms: u64,
+    pub is_supervisor: bool,
+}
 
 /// Handle to a process, wrapping the mailbox sender.
 ///
@@ -12,12 +44,26 @@ use crate::process::{Message, ProcessId, SendError};
 /// to its mailbox.
 pub struct ProcessHandle {
     tx: MailboxTx,
+    meta: ProcessMeta,
 }
 
 impl ProcessHandle {
     /// Create a new process handle wrapping the given mailbox sender.
     pub fn new(tx: MailboxTx) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            meta: ProcessMeta::default(),
+        }
+    }
+
+    /// Create a new process handle with metadata.
+    pub fn with_meta(tx: MailboxTx, meta: ProcessMeta) -> Self {
+        Self { tx, meta }
+    }
+
+    /// Get the process metadata.
+    pub fn meta(&self) -> &ProcessMeta {
+        &self.meta
     }
 
     /// Send a message to this process's mailbox.
@@ -94,6 +140,25 @@ impl ProcessTable {
     /// Return whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.processes.is_empty()
+    }
+
+    /// Take a snapshot of all processes for observability.
+    pub fn snapshot(&self) -> Vec<ProcessInfo> {
+        let now = Instant::now();
+        self.processes
+            .iter()
+            .map(|entry| {
+                let pid = *entry.key();
+                let meta = entry.value().meta();
+                ProcessInfo {
+                    pid,
+                    name: meta.name.clone(),
+                    parent: meta.parent,
+                    uptime_ms: now.duration_since(meta.spawned_at).as_millis() as u64,
+                    is_supervisor: meta.is_supervisor,
+                }
+            })
+            .collect()
     }
 }
 

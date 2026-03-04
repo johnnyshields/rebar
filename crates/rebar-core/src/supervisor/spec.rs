@@ -1,7 +1,7 @@
 use crate::process::ExitReason;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub enum RestartStrategy {
     OneForOne,
     OneForAll,
