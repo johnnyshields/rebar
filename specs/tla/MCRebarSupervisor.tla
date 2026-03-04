@@ -1,6 +1,6 @@
 ---- MODULE MCRebarSupervisor ----
 \* Model-checking wrapper for RebarSupervisor.tla
-\* Run: tlc MCRebarSupervisor -config MCRebarSupervisor.cfg -workers 4
+\* Run: tlc MCRebarSupervisor -config RebarSupervisor.cfg -workers 4
 
 EXTENDS RebarSupervisor, TLC
 
