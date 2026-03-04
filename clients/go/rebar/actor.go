@@ -4,6 +4,7 @@ package rebar
 import "C"
 import (
 	"sync"
+	"unsafe"
 )
 
 // Actor defines the interface that all Rebar actors must implement.
@@ -66,19 +67,44 @@ func registerActor(a Actor, r *Runtime) uint64 {
 	return id
 }
 
-// The active actor ID is set before spawning so the C callback can find it.
-// This is safe because rebar_spawn blocks until the callback is invoked.
-var activeActorID uint64
-
 //export goRebarProcessCallback
-func goRebarProcessCallback(pid C.rebar_pid_t) {
+func goRebarProcessCallback(pid C.rebar_pid_t, context C.uintptr_t) {
+	id := uint64(context)
 	actorMu.Lock()
-	entry, ok := actorMap[activeActorID]
+	entry, ok := actorMap[id]
 	actorMu.Unlock()
 	if !ok {
 		return
 	}
 	goPid := pidFromC(pid)
 	ctx := &Context{self: goPid, runtime: entry.runtime}
+
+	// Call HandleMessage with nil for the initialization callback.
 	entry.actor.HandleMessage(ctx, nil)
+
+	// Start a goroutine that loops calling rebar_recv and dispatches
+	// received messages to the actor's HandleMessage.
+	go func() {
+		for {
+			var msgPtr *C.rebar_msg_t
+			rc := C.rebar_recv(entry.runtime.ptr, pid, &msgPtr, C.int64_t(100))
+			if rc == C.int32_t(errTimeout) {
+				continue
+			}
+			if rc != C.int32_t(errOK) {
+				// Process dead or error — exit the loop.
+				break
+			}
+			// Extract message data
+			dataPtr := C.rebar_msg_data(msgPtr)
+			dataLen := C.rebar_msg_len(msgPtr)
+			var data []byte
+			if dataLen > 0 {
+				data = C.GoBytes(unsafe.Pointer(dataPtr), C.int(dataLen))
+			}
+			C.rebar_msg_free(msgPtr)
+
+			entry.actor.HandleMessage(ctx, NewMsg(data))
+		}
+	}()
 }

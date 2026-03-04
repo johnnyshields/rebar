@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use rebar_core::process::mailbox::{Mailbox, MailboxRx};
+use rebar_core::process::table::ProcessHandle;
 use rebar_core::process::ProcessId;
 use rebar_core::runtime::Runtime;
 
@@ -35,11 +38,16 @@ pub struct RebarMsg {
 }
 
 /// Opaque runtime wrapper holding both a tokio runtime and the rebar runtime,
-/// plus a simple local name registry.
+/// plus FFI mailbox storage for long-lived processes.
 pub struct RebarRuntime {
     tokio_rt: tokio::runtime::Runtime,
     runtime: Runtime,
-    registry: Mutex<HashMap<String, ProcessId>>,
+    /// Mailboxes for FFI-spawned processes, keyed by PID.
+    /// The MailboxRx is stored here so FFI code can poll it via `rebar_recv`.
+    mailboxes: Mutex<HashMap<ProcessId, MailboxRx>>,
+    /// Shutdown senders for FFI-spawned processes.
+    /// Dropping or sending on these signals the keep-alive task to exit.
+    stop_senders: Mutex<HashMap<ProcessId, tokio::sync::oneshot::Sender<()>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +59,7 @@ const REBAR_ERR_NULL_PTR: i32 = -1;
 const REBAR_ERR_SEND_FAILED: i32 = -2;
 const REBAR_ERR_NOT_FOUND: i32 = -3;
 const REBAR_ERR_INVALID_NAME: i32 = -4;
+const REBAR_ERR_TIMEOUT: i32 = -5;
 
 // ---------------------------------------------------------------------------
 // Message functions
@@ -128,7 +137,8 @@ pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
     Box::into_raw(Box::new(RebarRuntime {
         tokio_rt,
         runtime,
-        registry: Mutex::new(HashMap::new()),
+        mailboxes: Mutex::new(HashMap::new()),
+        stop_senders: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -148,15 +158,20 @@ pub extern "C" fn rebar_runtime_free(rt: *mut RebarRuntime) {
 // Spawn
 // ---------------------------------------------------------------------------
 
-/// Spawn a new process that calls `callback` with its own PID.
+/// Spawn a new process that calls `callback` with its own PID and an opaque
+/// context value.
+///
+/// The process stays alive after the callback returns so that it can receive
+/// messages via `rebar_recv`. Call `rebar_stop_process` to terminate it.
 ///
 /// The new process's PID is written to `pid_out`.
 /// Returns 0 on success, or a negative error code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn rebar_spawn(
     rt: *mut RebarRuntime,
-    callback: Option<extern "C" fn(RebarPid)>,
+    callback: Option<extern "C" fn(RebarPid, usize)>,
     pid_out: *mut RebarPid,
+    context: usize,
 ) -> i32 {
     if rt.is_null() || pid_out.is_null() {
         return REBAR_ERR_NULL_PTR;
@@ -167,20 +182,160 @@ pub extern "C" fn rebar_spawn(
         None => return REBAR_ERR_NULL_PTR,
     };
 
-    let pid = rt.tokio_rt.block_on(async {
-        rt.runtime
-            .spawn(move |ctx| async move {
-                let pid = ctx.self_pid();
-                let ffi_pid = RebarPid::from_process_id(pid);
-                cb(ffi_pid);
-            })
-            .await
+    // Manually allocate a PID, create a mailbox, and insert into the process table.
+    // We keep the MailboxRx in our mailboxes map so FFI can poll it via rebar_recv.
+    let table = rt.runtime.table();
+    let pid = table.allocate_pid();
+    let (tx, rx) = Mailbox::unbounded();
+    let handle = ProcessHandle::new(tx);
+    table.insert(pid, handle);
+
+    // Store the mailbox receiver for rebar_recv
+    {
+        let mut mailboxes = rt.mailboxes.lock().unwrap();
+        mailboxes.insert(pid, rx);
+    }
+
+    // Create a oneshot channel to keep the process "alive" in the table.
+    // When the stop sender is dropped or sent, the keep-alive task exits
+    // and removes the process from the table.
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut stops = rt.stop_senders.lock().unwrap();
+        stops.insert(pid, stop_tx);
+    }
+
+    // Spawn a keep-alive task that waits for the stop signal, then cleans up.
+    let table_clone = rt.runtime.table().clone();
+    rt.tokio_rt.spawn(async move {
+        let _ = stop_rx.await;
+        table_clone.remove(&pid);
     });
 
+    // Call the initialization callback with the new PID.
+    let ffi_pid = RebarPid::from_process_id(pid);
+    cb(ffi_pid, context);
+
     unsafe {
-        *pid_out = RebarPid::from_process_id(pid);
+        *pid_out = ffi_pid;
     }
     REBAR_OK
+}
+
+// ---------------------------------------------------------------------------
+// Recv
+// ---------------------------------------------------------------------------
+
+/// Receive a message from an FFI-spawned process's mailbox.
+///
+/// `timeout_ms` controls blocking behavior:
+///   - `-1`: block forever until a message arrives or the mailbox closes
+///   - `0`: non-blocking; return immediately if no message is available
+///   - `>0`: block for at most `timeout_ms` milliseconds
+///
+/// On success, writes a heap-allocated `RebarMsg` to `*msg_out` and returns
+/// `REBAR_OK`. The caller must free the message with `rebar_msg_free`.
+///
+/// Returns `REBAR_ERR_TIMEOUT` if no message arrived within the timeout.
+/// Returns `REBAR_ERR_NOT_FOUND` if the PID has no mailbox.
+#[unsafe(no_mangle)]
+pub extern "C" fn rebar_recv(
+    rt: *mut RebarRuntime,
+    pid: RebarPid,
+    msg_out: *mut *mut RebarMsg,
+    timeout_ms: i64,
+) -> i32 {
+    if rt.is_null() || msg_out.is_null() {
+        return REBAR_ERR_NULL_PTR;
+    }
+    let rt = unsafe { &*rt };
+    let process_id = pid.to_process_id();
+
+    // We need mutable access to the MailboxRx, so we take it out of the map,
+    // do the recv, then put it back.
+    let mut rx = {
+        let mut mailboxes = rt.mailboxes.lock().unwrap();
+        match mailboxes.remove(&process_id) {
+            Some(rx) => rx,
+            None => return REBAR_ERR_NOT_FOUND,
+        }
+    };
+
+    let result = rt.tokio_rt.block_on(async {
+        if timeout_ms < 0 {
+            rx.recv().await
+        } else if timeout_ms == 0 {
+            rx.try_recv()
+        } else {
+            rx.recv_timeout(Duration::from_millis(timeout_ms as u64))
+                .await
+        }
+    });
+
+    // Put the MailboxRx back
+    {
+        let mut mailboxes = rt.mailboxes.lock().unwrap();
+        mailboxes.insert(process_id, rx);
+    }
+
+    match result {
+        Some(msg) => {
+            // Extract the payload bytes. If it's a Binary, use the bytes directly.
+            // Otherwise serialize the rmpv::Value to msgpack bytes.
+            let bytes = match msg.payload() {
+                rmpv::Value::Binary(b) => b.clone(),
+                other => {
+                    let mut buf = Vec::new();
+                    rmpv::encode::write_value(&mut buf, other).unwrap();
+                    buf
+                }
+            };
+            let out_msg = Box::into_raw(Box::new(RebarMsg { data: bytes }));
+            unsafe {
+                *msg_out = out_msg;
+            }
+            REBAR_OK
+        }
+        None => REBAR_ERR_TIMEOUT,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stop Process
+// ---------------------------------------------------------------------------
+
+/// Stop an FFI-spawned process, removing it from the process table and
+/// cleaning up its mailbox.
+///
+/// Returns `REBAR_OK` on success, or `REBAR_ERR_NOT_FOUND` if the PID
+/// is not an FFI-managed process.
+#[unsafe(no_mangle)]
+pub extern "C" fn rebar_stop_process(rt: *mut RebarRuntime, pid: RebarPid) -> i32 {
+    if rt.is_null() {
+        return REBAR_ERR_NULL_PTR;
+    }
+    let rt = unsafe { &*rt };
+    let process_id = pid.to_process_id();
+
+    // Remove the mailbox
+    {
+        let mut mailboxes = rt.mailboxes.lock().unwrap();
+        mailboxes.remove(&process_id);
+    }
+
+    // Send the stop signal
+    let stop_tx = {
+        let mut stops = rt.stop_senders.lock().unwrap();
+        stops.remove(&process_id)
+    };
+
+    match stop_tx {
+        Some(tx) => {
+            let _ = tx.send(());
+            REBAR_OK
+        }
+        None => REBAR_ERR_NOT_FOUND,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,9 +358,7 @@ pub extern "C" fn rebar_send(rt: *mut RebarRuntime, dest: RebarPid, msg: *const 
     let dest_pid = dest.to_process_id();
     let payload = rmpv::Value::Binary(msg.data.clone());
 
-    let result = rt
-        .tokio_rt
-        .block_on(async { rt.runtime.send(dest_pid, payload).await });
+    let result = rt.runtime.send(dest_pid, payload);
 
     match result {
         Ok(()) => REBAR_OK,
@@ -231,15 +384,16 @@ pub extern "C" fn rebar_register(
     if rt.is_null() || name.is_null() {
         return REBAR_ERR_NULL_PTR;
     }
-    let rt = unsafe { &mut *rt };
+    let rt = unsafe { &*rt };
     let name_bytes = unsafe { std::slice::from_raw_parts(name, name_len) };
     let name_str = match std::str::from_utf8(name_bytes) {
         Ok(s) => s.to_owned(),
         Err(_) => return REBAR_ERR_INVALID_NAME,
     };
-    let mut reg = rt.registry.lock().unwrap();
-    reg.insert(name_str, pid.to_process_id());
-    REBAR_OK
+    match rt.runtime.register(name_str, pid.to_process_id()) {
+        Ok(()) => REBAR_OK,
+        Err(_) => REBAR_ERR_NOT_FOUND,
+    }
 }
 
 /// Look up a PID by name in the local registry.
@@ -263,11 +417,10 @@ pub extern "C" fn rebar_whereis(
         Ok(s) => s,
         Err(_) => return REBAR_ERR_INVALID_NAME,
     };
-    let reg = rt.registry.lock().unwrap();
-    match reg.get(name_str) {
+    match rt.runtime.whereis(name_str) {
         Some(pid) => {
             unsafe {
-                *pid_out = RebarPid::from_process_id(*pid);
+                *pid_out = RebarPid::from_process_id(pid);
             }
             REBAR_OK
         }
@@ -299,24 +452,37 @@ pub extern "C" fn rebar_send_named(
         Err(_) => return REBAR_ERR_INVALID_NAME,
     };
 
-    let dest_pid = {
-        let reg = rt_ref.registry.lock().unwrap();
-        match reg.get(name_str) {
-            Some(pid) => *pid,
-            None => return REBAR_ERR_NOT_FOUND,
-        }
-    };
-
     let msg_ref = unsafe { &*msg };
     let payload = rmpv::Value::Binary(msg_ref.data.clone());
 
-    let result = rt_ref
-        .tokio_rt
-        .block_on(async { rt_ref.runtime.send(dest_pid, payload).await });
-
-    match result {
+    match rt_ref.runtime.send_named(name_str, payload) {
         Ok(()) => REBAR_OK,
         Err(_) => REBAR_ERR_SEND_FAILED,
+    }
+}
+
+/// Unregister a name from the registry.
+///
+/// Returns 0 on success, `REBAR_ERR_NOT_FOUND` if the name is not
+/// registered, or a negative error code for null pointers / bad UTF-8.
+#[unsafe(no_mangle)]
+pub extern "C" fn rebar_unregister(
+    rt: *mut RebarRuntime,
+    name_ptr: *const u8,
+    name_len: usize,
+) -> i32 {
+    if rt.is_null() || name_ptr.is_null() {
+        return REBAR_ERR_NULL_PTR;
+    }
+    let rt = unsafe { &*rt };
+    let name_bytes = unsafe { std::slice::from_raw_parts(name_ptr, name_len) };
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return REBAR_ERR_INVALID_NAME,
+    };
+    match rt.runtime.unregister(name_str) {
+        Ok(_) => REBAR_OK,
+        Err(_) => REBAR_ERR_NOT_FOUND,
     }
 }
 
@@ -483,13 +649,13 @@ mod tests {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        extern "C" fn noop_callback(_pid: RebarPid) {}
+        extern "C" fn noop_callback(_pid: RebarPid, _ctx: usize) {}
 
         let mut pid_out = RebarPid {
             node_id: 0,
             local_id: 0,
         };
-        let rc = rebar_spawn(rt, Some(noop_callback), &mut pid_out);
+        let rc = rebar_spawn(rt, Some(noop_callback), &mut pid_out, 0);
         assert_eq!(rc, REBAR_OK);
         assert_eq!(pid_out.node_id, 1);
         assert!(pid_out.local_id > 0);
@@ -498,18 +664,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 11. send_to_spawned_process
+    // 11. send_to_spawned_process — process stays alive now
     // -----------------------------------------------------------------------
     #[test]
     fn send_to_spawned_process() {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        // We use an atomic flag to verify the callback ran.
         static CALLBACK_RAN: AtomicBool = AtomicBool::new(false);
         CALLBACK_RAN.store(false, Ordering::SeqCst);
 
-        extern "C" fn callback(_pid: RebarPid) {
+        extern "C" fn callback(_pid: RebarPid, _ctx: usize) {
             CALLBACK_RAN.store(true, Ordering::SeqCst);
         }
 
@@ -517,21 +682,15 @@ mod tests {
             node_id: 0,
             local_id: 0,
         };
-        let rc = rebar_spawn(rt, Some(callback), &mut pid_out);
+        let rc = rebar_spawn(rt, Some(callback), &mut pid_out, 0);
         assert_eq!(rc, REBAR_OK);
-
-        // Give the spawned process time to run.
-        std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(CALLBACK_RAN.load(Ordering::SeqCst));
 
-        // Send a message to the spawned process. The process has likely
-        // already exited (it only runs the callback), so we accept either
-        // success or send-failed.
+        // Process should still be alive — send should succeed.
         let data = b"hi";
         let msg = rebar_msg_create(data.as_ptr(), data.len());
         let send_rc = rebar_send(rt, pid_out, msg);
-        // The process may have exited already; both outcomes are acceptable.
-        assert!(send_rc == REBAR_OK || send_rc == REBAR_ERR_SEND_FAILED);
+        assert_eq!(send_rc, REBAR_OK);
 
         rebar_msg_free(msg);
         rebar_runtime_free(rt);
@@ -566,13 +725,20 @@ mod tests {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        let name = b"my_service";
-        let pid = RebarPid {
-            node_id: 1,
-            local_id: 42,
-        };
+        // Spawn a process so the PID exists in the table.
+        extern "C" fn idle_callback(_pid: RebarPid, _ctx: usize) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
 
-        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid);
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        let rc = rebar_spawn(rt, Some(idle_callback), &mut pid_out, 0);
+        assert_eq!(rc, REBAR_OK);
+
+        let name = b"my_service";
+        let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
         assert_eq!(rc, REBAR_OK);
 
         let mut found = RebarPid {
@@ -581,35 +747,29 @@ mod tests {
         };
         let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found);
         assert_eq!(rc, REBAR_OK);
-        assert_eq!(found.node_id, 1);
-        assert_eq!(found.local_id, 42);
+        assert_eq!(found.node_id, pid_out.node_id);
+        assert_eq!(found.local_id, pid_out.local_id);
 
         rebar_runtime_free(rt);
     }
 
     // -----------------------------------------------------------------------
-    // 14. send_named
+    // 14. send_named — process stays alive now
     // -----------------------------------------------------------------------
     #[test]
     fn send_named() {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        // Spawn a long-lived process to receive messages.
-        extern "C" fn long_lived_callback(_pid: RebarPid) {}
+        extern "C" fn noop(_pid: RebarPid, _ctx: usize) {}
 
         let mut pid_out = RebarPid {
             node_id: 0,
             local_id: 0,
         };
-        let rc = rebar_spawn(rt, Some(long_lived_callback), &mut pid_out);
+        let rc = rebar_spawn(rt, Some(noop), &mut pid_out, 0);
         assert_eq!(rc, REBAR_OK);
 
-        // We need to spawn a process that actually stays alive to receive.
-        // The callback-based spawn exits quickly, so we use a different
-        // approach: register a PID and attempt the send. Since the process
-        // exits quickly, we accept send failure. The test validates the
-        // registry lookup path works end-to-end.
         let name = b"worker";
         let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
         assert_eq!(rc, REBAR_OK);
@@ -617,8 +777,7 @@ mod tests {
         let data = b"payload";
         let msg = rebar_msg_create(data.as_ptr(), data.len());
         let rc = rebar_send_named(rt, name.as_ptr(), name.len(), msg);
-        // Process may have exited; both outcomes validate the path.
-        assert!(rc == REBAR_OK || rc == REBAR_ERR_SEND_FAILED);
+        assert_eq!(rc, REBAR_OK);
 
         rebar_msg_free(msg);
         rebar_runtime_free(rt);
@@ -638,6 +797,143 @@ mod tests {
             local_id: 0,
         };
         let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut pid_out);
+        assert_eq!(rc, REBAR_ERR_NOT_FOUND);
+
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. recv_after_send
+    // -----------------------------------------------------------------------
+    #[test]
+    fn recv_after_send() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn noop(_pid: RebarPid, _ctx: usize) {}
+
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        let rc = rebar_spawn(rt, Some(noop), &mut pid_out, 0);
+        assert_eq!(rc, REBAR_OK);
+
+        // Send a message
+        let data = b"hello recv";
+        let msg = rebar_msg_create(data.as_ptr(), data.len());
+        let rc = rebar_send(rt, pid_out, msg);
+        assert_eq!(rc, REBAR_OK);
+        rebar_msg_free(msg);
+
+        // Receive the message
+        let mut msg_out: *mut RebarMsg = std::ptr::null_mut();
+        let rc = rebar_recv(rt, pid_out, &mut msg_out, 1000);
+        assert_eq!(rc, REBAR_OK);
+        assert!(!msg_out.is_null());
+
+        let len = rebar_msg_len(msg_out);
+        let ptr = rebar_msg_data(msg_out);
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(slice, data);
+
+        rebar_msg_free(msg_out);
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. recv_nonblocking_returns_timeout
+    // -----------------------------------------------------------------------
+    #[test]
+    fn recv_nonblocking_returns_timeout() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn noop(_pid: RebarPid, _ctx: usize) {}
+
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        rebar_spawn(rt, Some(noop), &mut pid_out, 0);
+
+        let mut msg_out: *mut RebarMsg = std::ptr::null_mut();
+        let rc = rebar_recv(rt, pid_out, &mut msg_out, 0);
+        assert_eq!(rc, REBAR_ERR_TIMEOUT);
+        assert!(msg_out.is_null());
+
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. recv_timeout_expires
+    // -----------------------------------------------------------------------
+    #[test]
+    fn recv_timeout_expires() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn noop(_pid: RebarPid, _ctx: usize) {}
+
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        rebar_spawn(rt, Some(noop), &mut pid_out, 0);
+
+        let mut msg_out: *mut RebarMsg = std::ptr::null_mut();
+        let rc = rebar_recv(rt, pid_out, &mut msg_out, 10);
+        assert_eq!(rc, REBAR_ERR_TIMEOUT);
+
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. stop_process
+    // -----------------------------------------------------------------------
+    #[test]
+    fn stop_process() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        extern "C" fn noop(_pid: RebarPid, _ctx: usize) {}
+
+        let mut pid_out = RebarPid {
+            node_id: 0,
+            local_id: 0,
+        };
+        rebar_spawn(rt, Some(noop), &mut pid_out, 0);
+
+        let rc = rebar_stop_process(rt, pid_out);
+        assert_eq!(rc, REBAR_OK);
+
+        // Give the keep-alive task time to clean up
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Send should fail now
+        let data = b"dead";
+        let msg = rebar_msg_create(data.as_ptr(), data.len());
+        let rc = rebar_send(rt, pid_out, msg);
+        assert_eq!(rc, REBAR_ERR_SEND_FAILED);
+        rebar_msg_free(msg);
+
+        rebar_runtime_free(rt);
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. recv_invalid_pid_returns_not_found
+    // -----------------------------------------------------------------------
+    #[test]
+    fn recv_invalid_pid_returns_not_found() {
+        let rt = rebar_runtime_new(1);
+        assert!(!rt.is_null());
+
+        let pid = RebarPid {
+            node_id: 1,
+            local_id: 999,
+        };
+        let mut msg_out: *mut RebarMsg = std::ptr::null_mut();
+        let rc = rebar_recv(rt, pid, &mut msg_out, 0);
         assert_eq!(rc, REBAR_ERR_NOT_FOUND);
 
         rebar_runtime_free(rt);

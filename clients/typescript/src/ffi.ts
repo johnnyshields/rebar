@@ -36,7 +36,7 @@ export const lib = Deno.dlopen(libPath, {
     result: "void",
   },
   rebar_spawn: {
-    parameters: ["pointer", "function", "buffer"],
+    parameters: ["pointer", "function", "buffer", "usize"],
     result: "i32",
   },
   rebar_send: {
@@ -55,10 +55,22 @@ export const lib = Deno.dlopen(libPath, {
     parameters: ["pointer", "buffer", "usize", "pointer"],
     result: "i32",
   },
+  rebar_unregister: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
+  rebar_recv: {
+    parameters: ["pointer", { struct: ["u64", "u64"] }, "buffer", "i64"],
+    result: "i32",
+  },
+  rebar_stop_process: {
+    parameters: ["pointer", { struct: ["u64", "u64"] }],
+    result: "i32",
+  },
 });
 
 // Callback definition for rebar_spawn
 export const processCallbackDef = {
-  parameters: [{ struct: ["u64", "u64"] }],
+  parameters: [{ struct: ["u64", "u64"] }, "usize"],
   result: "void",
 } as const;

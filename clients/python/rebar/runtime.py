@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import ctypes
-from typing import TYPE_CHECKING
+import threading
+from typing import TYPE_CHECKING, Optional
 
 from . import _ffi
-from .errors import check_error
+from .errors import TimeoutError, check_error
 from .types import Pid
 
 if TYPE_CHECKING:
@@ -39,6 +40,18 @@ class Context:
     def send_named(self, name: str, data: bytes) -> None:
         """Send a message to a named process."""
         self._runtime.send_named(name, data)
+
+    def recv(self, timeout_ms: int = -1) -> Optional[bytes]:
+        """Receive a message from this process's mailbox.
+
+        Args:
+            timeout_ms: -1 = block forever, 0 = non-blocking, >0 = ms timeout.
+        """
+        return self._runtime.recv(self._pid, timeout_ms)
+
+    def unregister(self, name: str) -> None:
+        """Unregister a name."""
+        self._runtime.unregister(name)
 
 
 class Runtime:
@@ -114,23 +127,80 @@ class Runtime:
         finally:
             _ffi._lib.rebar_msg_free(msg)
 
+    def unregister(self, name: str) -> None:
+        """Unregister a name."""
+        name_bytes = name.encode("utf-8")
+        rc = _ffi._lib.rebar_unregister(
+            self._ptr, name_bytes, len(name_bytes),
+        )
+        check_error(rc)
+
+    def recv(self, pid: Pid, timeout_ms: int = -1) -> Optional[bytes]:
+        """Receive a message from an FFI-spawned process's mailbox.
+
+        Args:
+            pid: The process to receive from.
+            timeout_ms: -1 = block forever, 0 = non-blocking, >0 = ms timeout.
+
+        Returns:
+            The message payload as bytes, or None on timeout.
+
+        Raises:
+            TimeoutError: If timeout_ms >= 0 and no message arrived in time.
+        """
+        ffi_pid = _ffi.RebarPid(pid.node_id, pid.local_id)
+        msg_out = ctypes.c_void_p()
+        rc = _ffi._lib.rebar_recv(self._ptr, ffi_pid, ctypes.byref(msg_out), timeout_ms)
+        if rc == -5:  # REBAR_ERR_TIMEOUT
+            raise TimeoutError()
+        check_error(rc)
+        try:
+            data_ptr = _ffi._lib.rebar_msg_data(msg_out)
+            data_len = _ffi._lib.rebar_msg_len(msg_out)
+            if data_len > 0:
+                return bytes(ctypes.cast(data_ptr, ctypes.POINTER(ctypes.c_uint8 * data_len)).contents)
+            return b""
+        finally:
+            _ffi._lib.rebar_msg_free(msg_out)
+
+    def stop_process(self, pid: Pid) -> None:
+        """Stop an FFI-spawned process."""
+        ffi_pid = _ffi.RebarPid(pid.node_id, pid.local_id)
+        rc = _ffi._lib.rebar_stop_process(self._ptr, ffi_pid)
+        check_error(rc)
+
     def spawn_actor(self, actor: Actor) -> Pid:
         """Spawn a new process backed by the given Actor.
 
-        The actor's handle_message is called with a None message on startup.
+        The actor's handle_message is called with a None message on startup,
+        then a daemon thread polls for messages and dispatches them.
         """
         pid_out = _ffi.RebarPid()
         runtime_ref = self
 
         @_ffi.PROCESS_CALLBACK
-        def callback(ffi_pid: _ffi.RebarPid) -> None:
+        def callback(ffi_pid: _ffi.RebarPid, _context: int) -> None:
             pid = Pid(node_id=ffi_pid.node_id, local_id=ffi_pid.local_id)
             ctx = Context(pid, runtime_ref)
             actor.handle_message(ctx, None)
 
+            # Start a daemon thread for the message loop
+            def message_loop() -> None:
+                while True:
+                    try:
+                        msg_bytes = runtime_ref.recv(pid, timeout_ms=100)
+                        actor.handle_message(ctx, msg_bytes)
+                    except TimeoutError:
+                        continue
+                    except Exception:
+                        break
+
+            t = threading.Thread(target=message_loop, daemon=True)
+            t.start()
+
         # Keep reference to prevent GC of the callback
         self._callbacks.append(callback)
 
-        rc = _ffi._lib.rebar_spawn(self._ptr, callback, ctypes.byref(pid_out))
+        rc = _ffi._lib.rebar_spawn(self._ptr, callback, ctypes.byref(pid_out), 0)
         check_error(rc)
         return Pid(node_id=pid_out.node_id, local_id=pid_out.local_id)

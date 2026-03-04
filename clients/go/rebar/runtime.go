@@ -5,9 +5,9 @@ package rebar
 
 // Go cannot pass Go function pointers directly to C.
 // C trampoline that calls back into Go.
-extern void goRebarProcessCallback(rebar_pid_t pid);
-static inline int32_t rebar_spawn_go(rebar_runtime_t *rt, rebar_pid_t *pid_out) {
-    return rebar_spawn(rt, goRebarProcessCallback, pid_out);
+extern void goRebarProcessCallback(rebar_pid_t pid, uintptr_t context);
+static inline int32_t rebar_spawn_go(rebar_runtime_t *rt, rebar_pid_t *pid_out, uintptr_t context) {
+    return rebar_spawn(rt, goRebarProcessCallback, pid_out, context);
 }
 */
 import "C"
@@ -86,18 +86,50 @@ func (r *Runtime) SendNamed(name string, data []byte) error {
 	return checkError(rc)
 }
 
+// Unregister removes a name from the runtime's registry.
+func (r *Runtime) Unregister(name string) error {
+	nameBytes := []byte(name)
+	rc := C.rebar_unregister(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&nameBytes[0])),
+		C.size_t(len(nameBytes)),
+	)
+	return checkError(rc)
+}
+
+// Recv receives a message from an FFI-spawned process's mailbox.
+// timeoutMs controls blocking: -1 = forever, 0 = non-blocking, >0 = ms timeout.
+func (r *Runtime) Recv(pid Pid, timeoutMs int64) (*Msg, error) {
+	var msgPtr *C.rebar_msg_t
+	rc := C.rebar_recv(r.ptr, pidToC(pid), &msgPtr, C.int64_t(timeoutMs))
+	if err := checkError(rc); err != nil {
+		return nil, err
+	}
+	defer C.rebar_msg_free(msgPtr)
+
+	dataPtr := C.rebar_msg_data(msgPtr)
+	dataLen := C.rebar_msg_len(msgPtr)
+	var data []byte
+	if dataLen > 0 {
+		data = C.GoBytes(unsafe.Pointer(dataPtr), C.int(dataLen))
+	}
+	return NewMsg(data), nil
+}
+
+// StopProcess stops an FFI-spawned process, removing it from the process table.
+func (r *Runtime) StopProcess(pid Pid) error {
+	rc := C.rebar_stop_process(r.ptr, pidToC(pid))
+	return checkError(rc)
+}
+
 // SpawnActor spawns a new process backed by the given Actor.
 // The actor's HandleMessage is called with a nil message on startup
 // (as a lifecycle hook), and the process PID is returned.
 func (r *Runtime) SpawnActor(actor Actor) (Pid, error) {
 	id := registerActor(actor, r)
 
-	actorMu.Lock()
-	activeActorID = id
-	actorMu.Unlock()
-
 	var pidOut C.rebar_pid_t
-	rc := C.rebar_spawn_go(r.ptr, &pidOut)
+	rc := C.rebar_spawn_go(r.ptr, &pidOut, C.uintptr_t(id))
 	if err := checkError(rc); err != nil {
 		return Pid{}, err
 	}

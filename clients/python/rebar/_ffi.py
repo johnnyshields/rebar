@@ -11,8 +11,8 @@ class RebarPid(ctypes.Structure):
     _fields_ = [("node_id", ctypes.c_uint64), ("local_id", ctypes.c_uint64)]
 
 
-# Callback type: void (*)(rebar_pid_t)
-PROCESS_CALLBACK = ctypes.CFUNCTYPE(None, RebarPid)
+# Callback type: void (*)(rebar_pid_t, uintptr_t)
+PROCESS_CALLBACK = ctypes.CFUNCTYPE(None, RebarPid, ctypes.c_size_t)
 
 
 def _find_library() -> str:
@@ -70,11 +70,19 @@ _lib.rebar_runtime_free.argtypes = [ctypes.c_void_p]
 _lib.rebar_runtime_free.restype = None
 
 # --- Process API ---
-_lib.rebar_spawn.argtypes = [ctypes.c_void_p, PROCESS_CALLBACK, ctypes.POINTER(RebarPid)]
+_lib.rebar_spawn.argtypes = [ctypes.c_void_p, PROCESS_CALLBACK, ctypes.POINTER(RebarPid), ctypes.c_size_t]
 _lib.rebar_spawn.restype = ctypes.c_int32
 
 _lib.rebar_send.argtypes = [ctypes.c_void_p, RebarPid, ctypes.c_void_p]
 _lib.rebar_send.restype = ctypes.c_int32
+
+_lib.rebar_recv.argtypes = [
+    ctypes.c_void_p, RebarPid, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int64
+]
+_lib.rebar_recv.restype = ctypes.c_int32
+
+_lib.rebar_stop_process.argtypes = [ctypes.c_void_p, RebarPid]
+_lib.rebar_stop_process.restype = ctypes.c_int32
 
 # --- Registry API ---
 _lib.rebar_register.argtypes = [
@@ -91,3 +99,8 @@ _lib.rebar_send_named.argtypes = [
     ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p
 ]
 _lib.rebar_send_named.restype = ctypes.c_int32
+
+_lib.rebar_unregister.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t
+]
+_lib.rebar_unregister.restype = ctypes.c_int32
