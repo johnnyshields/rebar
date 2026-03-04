@@ -34,6 +34,11 @@ export class Context {
   sendNamed(name: string, data: Uint8Array): void {
     this._runtime.sendNamed(name, data);
   }
+
+  /** Unregister a name. */
+  unregister(name: string): void {
+    this._runtime.unregister(name);
+  }
 }
 
 // deno-lint-ignore no-explicit-any
@@ -131,6 +136,17 @@ export class Runtime implements Disposable {
     } finally {
       lib.symbols.rebar_msg_free(msg);
     }
+  }
+
+  /** Unregister a name. */
+  unregister(name: string): void {
+    const nameBytes = new TextEncoder().encode(name);
+    const rc = lib.symbols.rebar_unregister(
+      this.ptr,
+      nameBytes as BufferSource,
+      BigInt(nameBytes.byteLength),
+    );
+    checkError(rc);
   }
 
   /** Spawn a new process backed by the given Actor. */

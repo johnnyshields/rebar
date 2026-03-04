@@ -55,6 +55,10 @@ export const lib = Deno.dlopen(libPath, {
     parameters: ["pointer", "buffer", "usize", "pointer"],
     result: "i32",
   },
+  rebar_unregister: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
 });
 
 // Callback definition for rebar_spawn

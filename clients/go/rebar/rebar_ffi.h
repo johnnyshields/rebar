@@ -45,5 +45,7 @@ int32_t rebar_whereis(rebar_runtime_t *rt, const uint8_t *name,
                       size_t name_len, rebar_pid_t *pid_out);
 int32_t rebar_send_named(rebar_runtime_t *rt, const uint8_t *name,
                          size_t name_len, const rebar_msg_t *msg);
+int32_t rebar_unregister(rebar_runtime_t *rt, const uint8_t *name,
+                         size_t name_len);
 
 #endif /* REBAR_FFI_H */

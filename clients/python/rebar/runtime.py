@@ -40,6 +40,10 @@ class Context:
         """Send a message to a named process."""
         self._runtime.send_named(name, data)
 
+    def unregister(self, name: str) -> None:
+        """Unregister a name."""
+        self._runtime.unregister(name)
+
 
 class Runtime:
     """Manages a Rebar actor runtime. Use as a context manager.
@@ -113,6 +117,14 @@ class Runtime:
             check_error(rc)
         finally:
             _ffi._lib.rebar_msg_free(msg)
+
+    def unregister(self, name: str) -> None:
+        """Unregister a name."""
+        name_bytes = name.encode("utf-8")
+        rc = _ffi._lib.rebar_unregister(
+            self._ptr, name_bytes, len(name_bytes),
+        )
+        check_error(rc)
 
     def spawn_actor(self, actor: Actor) -> Pid:
         """Spawn a new process backed by the given Actor.

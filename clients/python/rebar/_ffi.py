@@ -91,3 +91,8 @@ _lib.rebar_send_named.argtypes = [
     ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p
 ]
 _lib.rebar_send_named.restype = ctypes.c_int32
+
+_lib.rebar_unregister.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t
+]
+_lib.rebar_unregister.restype = ctypes.c_int32
