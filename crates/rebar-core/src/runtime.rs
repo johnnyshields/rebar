@@ -35,6 +35,11 @@ impl ProcessContext {
         self.rx.recv_timeout(duration).await
     }
 
+    /// Return a reference to the message router.
+    pub fn router(&self) -> &Arc<dyn MessageRouter> {
+        &self.router
+    }
+
     /// Send a message to another process by PID.
     pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         self.router.route(self.pid, dest, payload)

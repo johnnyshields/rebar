@@ -712,7 +712,9 @@ dependencies = [
 name = "rebar-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dashmap",
+ "rmp-serde",
  "rmpv",
  "serde",
  "thiserror 2.0.18",

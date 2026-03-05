@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 
 use crate::process::mailbox::MailboxTx;
-use crate::process::{Message, ProcessId, SendError};
+use crate::process::{Message, ProcessId, RegistryError, SendError};
 
 /// Handle to a process, wrapping the mailbox sender.
 ///
@@ -35,6 +37,7 @@ pub struct ProcessTable {
     node_id: u64,
     next_id: AtomicU64,
     processes: DashMap<ProcessId, ProcessHandle>,
+    names: RwLock<HashMap<String, ProcessId>>,
 }
 
 impl ProcessTable {
@@ -44,6 +47,7 @@ impl ProcessTable {
             node_id,
             next_id: AtomicU64::new(1),
             processes: DashMap::new(),
+            names: RwLock::new(HashMap::new()),
         }
     }
 
@@ -84,6 +88,54 @@ impl ProcessTable {
             Some(handle) => handle.send(msg),
             None => Err(SendError::ProcessDead(pid)),
         }
+    }
+
+    /// Check whether a process is alive (exists in the table).
+    pub fn is_alive(&self, pid: &ProcessId) -> bool {
+        self.processes.contains_key(pid)
+    }
+
+    /// Kill a process by removing it from the table.
+    ///
+    /// Returns `true` if the process was found and removed.
+    pub fn kill(&self, pid: &ProcessId) -> bool {
+        // Also clean up any name registrations for this PID
+        if let Ok(mut names) = self.names.write() {
+            names.retain(|_, v| v != pid);
+        }
+        self.processes.remove(pid).is_some()
+    }
+
+    /// Return a list of all live process IDs.
+    pub fn list_pids(&self) -> Vec<ProcessId> {
+        self.processes.iter().map(|entry| *entry.key()).collect()
+    }
+
+    /// Register a name for a process.
+    pub fn register_name(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
+        if !self.processes.contains_key(&pid) {
+            return Err(RegistryError::ProcessNotFound(pid));
+        }
+        let mut names = self.names.write().unwrap();
+        if names.contains_key(&name) {
+            return Err(RegistryError::NameAlreadyRegistered(name));
+        }
+        names.insert(name, pid);
+        Ok(())
+    }
+
+    /// Unregister a name, returning the PID it was associated with.
+    pub fn unregister_name(&self, name: &str) -> Result<ProcessId, RegistryError> {
+        let mut names = self.names.write().unwrap();
+        names
+            .remove(name)
+            .ok_or_else(|| RegistryError::NameNotFound(name.to_string()))
+    }
+
+    /// Look up a PID by its registered name.
+    pub fn whereis(&self, name: &str) -> Option<ProcessId> {
+        let names = self.names.read().unwrap();
+        names.get(name).copied()
     }
 
     /// Return the number of processes currently in the table.
