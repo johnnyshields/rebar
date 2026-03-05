@@ -292,7 +292,7 @@ pub async fn call_from_runtime(
             (rmpv::Value::String("ref".into()), rmpv::Value::Integer(ref_id.into())),
             (rmpv::Value::String("req".into()), request),
         ]);
-        if let Err(e) = ctx.send(dest, envelope) {
+        if let Err(e) = ctx.send(dest, envelope).await {
             let _ = tx.send(Err(CallError::SendFailed(e)));
             return;
         }
@@ -323,7 +323,7 @@ pub async fn call_from_runtime(
 }
 
 /// Fire-and-forget cast from outside any process.
-pub fn cast_from_runtime(
+pub async fn cast_from_runtime(
     runtime: &Runtime,
     dest: ProcessId,
     request: rmpv::Value,
@@ -332,11 +332,11 @@ pub fn cast_from_runtime(
         (rmpv::Value::String("$gs".into()), rmpv::Value::String("cast".into())),
         (rmpv::Value::String("req".into()), request),
     ]);
-    runtime.send(dest, envelope)
+    runtime.send(dest, envelope).await
 }
 
 /// Reply to a From (for deferred replies outside the GenServer callbacks).
-pub fn reply_from_runtime(
+pub async fn reply_from_runtime(
     runtime: &Runtime,
     from: &From,
     response: rmpv::Value,
@@ -346,7 +346,7 @@ pub fn reply_from_runtime(
         (rmpv::Value::String("ref".into()), rmpv::Value::Integer(from.ref_id.into())),
         (rmpv::Value::String("val".into()), response),
     ]);
-    runtime.send(from.pid, envelope)
+    runtime.send(from.pid, envelope).await
 }
 
 /// Create a ChildEntry for supervision.
@@ -444,7 +444,7 @@ mod tests {
     async fn basic_cast() {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
         // Give the cast time to process
         tokio::time::sleep(Duration::from_millis(50)).await;
         let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
@@ -496,7 +496,7 @@ mod tests {
         let pid = start(&rt, InfoServer { tx }, rmpv::Value::Nil).await;
 
         // Send a raw message (no $gs envelope) — should go to handle_info
-        rt.send(pid, rmpv::Value::String("raw_info".into())).unwrap();
+        rt.send(pid, rmpv::Value::String("raw_info".into())).await.unwrap();
 
         let received = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
         assert_eq!(received.as_str().unwrap(), "raw_info");
@@ -519,7 +519,7 @@ mod tests {
     async fn stop_from_cast() {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).unwrap();
+        cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
     }
@@ -618,7 +618,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Trigger completion via raw info message
-        rt.send(pid, rmpv::Value::String("complete".into())).unwrap();
+        rt.send(pid, rmpv::Value::String("complete".into())).await.unwrap();
 
         let result = call_handle.await.unwrap().unwrap();
         assert_eq!(result.as_str().unwrap(), "deferred_result");
@@ -629,8 +629,8 @@ mod tests {
     async fn cast_from_runtime_test() {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(10u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
         assert_eq!(reply.as_u64().unwrap(), 12);

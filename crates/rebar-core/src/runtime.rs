@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::process::mailbox::{Mailbox, MailboxRx};
 use crate::process::table::{ProcessHandle, ProcessTable};
-use crate::process::{Message, ProcessId, SendError};
+use crate::process::{Message, ProcessId, RegistryError, SendError};
 use crate::router::{LocalRouter, MessageRouter};
 
 /// Context provided to each spawned process, giving it access to its own
@@ -130,12 +130,50 @@ impl Runtime {
         pid
     }
 
+    /// Check whether a process is alive.
+    pub fn is_alive(&self, pid: ProcessId) -> bool {
+        self.table.is_alive(&pid)
+    }
+
+    /// Kill a process, closing its mailbox.
+    pub fn kill(&self, pid: ProcessId) -> bool {
+        self.table.kill(&pid)
+    }
+
+    /// Return a list of all live process IDs.
+    pub fn list_processes(&self) -> Vec<ProcessId> {
+        self.table.list_pids()
+    }
+
     /// Send a message to a process by PID from outside any process context.
     ///
     /// Uses a synthetic PID of <node_id, 0> as the sender.
     pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         let from = ProcessId::new(self.node_id, 0);
         self.router.route(from, dest, payload)
+    }
+
+    /// Register a name for a process.
+    pub fn register(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
+        self.table.register_name(name, pid)
+    }
+
+    /// Unregister a name, returning the PID it was associated with.
+    pub fn unregister(&self, name: &str) -> Result<ProcessId, RegistryError> {
+        self.table.unregister_name(name)
+    }
+
+    /// Look up a PID by its registered name.
+    pub fn whereis(&self, name: &str) -> Option<ProcessId> {
+        self.table.whereis(name)
+    }
+
+    /// Send a message to a named process.
+    pub async fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
+        let pid = self.table.whereis(name)
+            .ok_or_else(|| SendError::NameNotFound(name.to_owned()))?;
+        let from = ProcessId::new(self.node_id, 0);
+        self.router.route(from, pid, payload)
     }
 }
 

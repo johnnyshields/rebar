@@ -82,6 +82,18 @@ pub enum SendError {
     MailboxFull(ProcessId),
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
+    #[error("name not found: {0}")]
+    NameNotFound(String),
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RegistryError {
+    #[error("name already registered: {0}")]
+    NameAlreadyRegistered(String),
+    #[error("process not found: {0}")]
+    ProcessNotFound(ProcessId),
+    #[error("name not found: {0}")]
+    NameNotFound(String),
 }
 
 #[cfg(test)]
