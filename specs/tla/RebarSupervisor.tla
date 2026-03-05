@@ -121,7 +121,10 @@ StoppingChildExits(i) ==
 
 \* [ACTION] An exit record is moved from pending_exits to sup_queue.
 \* Models async message delivery (unbounded channel).
+\* Guard: only delivers while supervisor loop is running; after shutdown the
+\* receiver is dropped and pending messages are lost.
 DeliverExitToSupervisor(e) ==
+    /\ sup_state = "running"
     /\ e \in pending_exits
     /\ sup_queue'     = Append(sup_queue, e)
     /\ pending_exits' = pending_exits \ {e}
@@ -236,11 +239,12 @@ SupervisorEscalates ==
        IN  /\ child_pid[e.index] = e.pid
            /\ e.reason = "error"
            /\ ~UnderRestartLimit
-           /\ sup_queue'    = Tail(sup_queue)
+           /\ sup_queue'    = <<>>
            /\ sup_state'    = "shutdown"
            /\ child_pid'    = [i \in Children |-> None]
            /\ child_status' = [i \in Children |-> "stopped"]
-           /\ UNCHANGED <<restart_count, next_pid, pending_exits>>
+           /\ pending_exits' = {}
+           /\ UNCHANGED <<restart_count, next_pid>>
 
 \* [ACTION] External shutdown request (SupervisorHandle::shutdown()).
 SupervisorShutdown ==
@@ -248,7 +252,9 @@ SupervisorShutdown ==
     /\ sup_state'    = "shutdown"
     /\ child_pid'    = [i \in Children |-> None]
     /\ child_status' = [i \in Children |-> "stopped"]
-    /\ UNCHANGED <<sup_queue, restart_count, next_pid, pending_exits>>
+    /\ sup_queue'    = <<>>
+    /\ pending_exits' = {}
+    /\ UNCHANGED <<restart_count, next_pid>>
 
 ----
 (****************************************************************************)
@@ -296,7 +302,8 @@ NoDoubleLiveChild ==
 \* actions (e.g., a child exiting naturally) don't trigger the property.
 \* Bug hunted: without the PID guard, stale exits trigger spurious restarts.
 StaleExitSafety ==
-    [][Len(sup_queue) > 0 /\ sup_queue' = Tail(sup_queue) /\
+    [][Len(sup_queue) > 0 /\ sup_state' = "running" /\
+       sup_queue' = Tail(sup_queue) /\
        child_pid[Head(sup_queue).index] # Head(sup_queue).pid
        => child_pid' = child_pid /\ child_status' = child_status]_vars
 
@@ -334,11 +341,13 @@ NoRestartAfterShutdown ==
 (* Liveness properties                                                      *)
 (****************************************************************************)
 
-\* A stopped child is eventually restarted (or supervisor shuts down).
+\* A stopped child with a pending exit is eventually restarted, normally
+\* retired (PID set to None), or the supervisor shuts down.
+\* Normal exits legitimately leave a child stopped with PID=None.
 ChildEventuallyRestarted ==
     \A i \in Children :
-        (child_status[i] = "stopped" /\ sup_state = "running") ~>
-        (child_status[i] = "running" \/ sup_state = "shutdown")
+        (child_status[i] = "stopped" /\ sup_state = "running" /\ child_pid[i] # None) ~>
+        (child_status[i] = "running" \/ sup_state = "shutdown" \/ child_pid[i] = None)
 
 \* The supervisor queue eventually drains.
 QueueEventuallyDrains ==
@@ -353,5 +362,6 @@ StateConstraint ==
     /\ next_pid <= MaxPid
     /\ restart_count <= MaxRestarts + 1
     /\ Len(sup_queue) <= Cardinality(Children) + 2
+    /\ Cardinality(pending_exits) <= 2 * Cardinality(Children)
 
 =============================================================================

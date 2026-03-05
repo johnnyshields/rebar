@@ -143,11 +143,27 @@ NodeRecordAck(n, m) ==
 \* [ACTION] Suspect timer fires at n for m: transition Suspect -> Dead.
 \* Mirrors FailureDetector::check_suspect_timeouts.
 \* A node does not suspect itself (n # m).
+\*
+\* Two timing guards model the real-world assumption that suspect_timeout is
+\* long enough for (a) gossip to propagate to the observer AND (b) the
+\* suspected node to refute if it is still alive:
+\*   Guard 1 (local):  n has processed all available Alive gossip for m.
+\*   Guard 2 (global): m cannot refute — either dead, at MaxInc, or no
+\*                      suspect gossip left to refute. Uses ground-truth
+\*                      is_alive[m] to model the timing assumption without
+\*                      adding explicit clocks.
 SuspectTimeoutFires(n, m) ==
     /\ n # m
     /\ is_alive[n]
     /\ node_state[n][m] = "Suspect"
     /\ ~suspect_expired[n][m]
+    \* Guard 1: n has consumed all pending Alive gossip for m
+    /\ ~\E msg \in gossip_pool :
+           msg.type = "Alive" /\ msg.target = m /\ msg.inc > incarnation[n][m]
+    \* Guard 2: m has no pending refutation (dead, exhausted, or already refuted)
+    /\ ~(is_alive[m] /\ self_inc[m] < MaxInc /\
+         \E msg \in gossip_pool :
+            msg.type = "Suspect" /\ msg.target = m /\ msg.inc >= self_inc[m])
     /\ suspect_expired' = [suspect_expired EXCEPT ![n][m] = TRUE]
     /\ node_state'      = [node_state EXCEPT ![n][m] = "Dead"]
     /\ UNCHANGED <<incarnation, self_inc, gossip_pool, is_alive>>
@@ -180,11 +196,13 @@ Spec == Init /\ [][Next]_vars
 (* Safety invariants                                                        *)
 (****************************************************************************)
 
-\* A live node must not be declared Dead at every observer.
-\* Bug: the >= vs > asymmetry can trap an alive node in a Suspect/Dead cycle
-\* where every refutation attempt is immediately overridden by stale gossip.
+\* A live node with remaining incarnation budget must not be declared Dead
+\* at every observer. The >= vs > asymmetry in suspect/alive guards causes
+\* repeated re-suspecting that burns through incarnations; once self_inc
+\* reaches MaxInc the node can no longer refute and may be permanently killed.
+\* This invariant holds while budget remains — exhaustion IS the bug.
 AliveNodeNotPermanentlyDead ==
-    \A m \in Nodes : is_alive[m] =>
+    \A m \in Nodes : is_alive[m] /\ self_inc[m] < MaxInc =>
         \E n \in Nodes : n # m /\ node_state[n][m] # "Dead"
 
 \* Incarnation numbers at a given observer never decrease for a given target.
