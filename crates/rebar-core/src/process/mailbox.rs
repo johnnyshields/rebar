@@ -89,17 +89,19 @@ impl MailboxTx {
     /// full, returns `SendError::MailboxFull`; if the receiver is dropped,
     /// returns `SendError::ProcessDead`.
     pub fn send(&self, msg: Message) -> Result<(), SendError> {
+        self.try_send(msg)
+    }
+
+    /// Send a message, waiting for space if the mailbox is bounded and full.
+    ///
+    /// Unlike `send()`, which returns `MailboxFull` immediately when a bounded
+    /// mailbox is at capacity, this method awaits until space is available.
+    pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
         match &self.inner {
-            TxInner::Unbounded(tx) => {
-                let from = msg.from();
-                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
-            }
+            TxInner::Unbounded(tx) => Self::send_unbounded(tx, msg),
             TxInner::Bounded(tx) => {
                 let from = msg.from();
-                tx.try_send(msg).map_err(|e| match e {
-                    mpsc::error::TrySendError::Full(_) => SendError::MailboxFull(from),
-                    mpsc::error::TrySendError::Closed(_) => SendError::ProcessDead(from),
-                })
+                tx.send(msg).await.map_err(|_| SendError::ProcessDead(from))
             }
         }
     }
@@ -111,10 +113,7 @@ impl MailboxTx {
     /// is at capacity.
     pub fn try_send(&self, msg: Message) -> Result<(), SendError> {
         match &self.inner {
-            TxInner::Unbounded(tx) => {
-                let from = msg.from();
-                tx.send(msg).map_err(|_| SendError::ProcessDead(from))
-            }
+            TxInner::Unbounded(tx) => Self::send_unbounded(tx, msg),
             TxInner::Bounded(tx) => {
                 let from = msg.from();
                 tx.try_send(msg).map_err(|e| match e {
@@ -123,6 +122,14 @@ impl MailboxTx {
                 })
             }
         }
+    }
+
+    /// Send a message on an unbounded channel.
+    ///
+    /// Returns `SendError::ProcessDead` if the receiver has been dropped.
+    fn send_unbounded(tx: &mpsc::UnboundedSender<Message>, msg: Message) -> Result<(), SendError> {
+        let from = msg.from();
+        tx.send(msg).map_err(|_| SendError::ProcessDead(from))
     }
 }
 
@@ -301,5 +308,72 @@ mod tests {
             Err(SendError::MailboxFull(_)) => {}
             other => panic!("expected MailboxFull, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn send_async_waits_for_space() {
+        let (tx, mut rx) = Mailbox::bounded(1);
+        let pid = ProcessId::new(0, 1);
+
+        // Fill the mailbox
+        let msg1 = Message::new(pid, rmpv::Value::from(1));
+        tx.send(msg1).unwrap();
+
+        // Regular send should fail (mailbox full)
+        let msg2 = Message::new(pid, rmpv::Value::from(2));
+        assert!(matches!(tx.send(msg2), Err(SendError::MailboxFull(_))));
+
+        // send_async should wait, then succeed when space is made
+        let tx_clone = tx.clone();
+        let handle = tokio::spawn(async move {
+            let msg3 = Message::new(pid, rmpv::Value::from(3));
+            tx_clone.send_async(msg3).await.unwrap();
+        });
+
+        // Give the sender a moment to start waiting
+        tokio::task::yield_now().await;
+
+        // Consume a message to make space
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(1));
+
+        // The send_async should now complete
+        handle.await.unwrap();
+
+        // Verify the async-sent message is in the mailbox
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn send_async_to_closed_bounded_returns_process_dead() {
+        let (tx, rx) = Mailbox::bounded(10);
+        drop(rx);
+        let pid = ProcessId::new(0, 1);
+        let msg = Message::new(pid, rmpv::Value::from(1));
+        let result = tx.send_async(msg).await;
+        assert!(matches!(result, Err(SendError::ProcessDead(_))));
+    }
+
+    #[tokio::test]
+    async fn send_async_to_closed_unbounded_returns_process_dead() {
+        let (tx, rx) = Mailbox::unbounded();
+        drop(rx);
+        let pid = ProcessId::new(0, 1);
+        let msg = Message::new(pid, rmpv::Value::from(1));
+        let result = tx.send_async(msg).await;
+        assert!(matches!(result, Err(SendError::ProcessDead(_))));
+    }
+
+    #[tokio::test]
+    async fn send_async_unbounded_works() {
+        let (tx, mut rx) = Mailbox::unbounded();
+        let pid = ProcessId::new(0, 1);
+
+        let msg = Message::new(pid, rmpv::Value::from(42));
+        tx.send_async(msg).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload().as_u64(), Some(42));
     }
 }
