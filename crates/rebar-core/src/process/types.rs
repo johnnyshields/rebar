@@ -74,7 +74,8 @@ impl ExitReason {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SendError {
     #[error("process dead: {0}")]
     ProcessDead(ProcessId),
@@ -84,6 +85,8 @@ pub enum SendError {
     NodeUnreachable(u64),
     #[error("name not found: {0}")]
     NameNotFound(String),
+    #[error("malformed frame: {0}")]
+    MalformedFrame(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
