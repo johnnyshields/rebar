@@ -109,7 +109,7 @@ pub trait GenServer: Send + Sync + 'static {
         InfoReply::NoReply(state)
     }
 
-    async fn terminate(&self, _reason: &str, _state: &Self::State) {}
+    async fn terminate(&self, _reason: &str, _state: Self::State) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ async fn gen_server_loop<S: GenServer>(
                     }
                     CallReply::Stop(reason, response, final_state) => {
                         let _ = ctx.reply(&from, response);
-                        server.terminate(&reason, &final_state).await;
+                        server.terminate(&reason, final_state).await;
                         return ExitReason::Normal;
                     }
                 }
@@ -193,7 +193,7 @@ async fn gen_server_loop<S: GenServer>(
                         state = new_state;
                     }
                     CastReply::Stop(reason, final_state) => {
-                        server.terminate(&reason, &final_state).await;
+                        server.terminate(&reason, final_state).await;
                         return ExitReason::Normal;
                     }
                 }
@@ -202,7 +202,7 @@ async fn gen_server_loop<S: GenServer>(
                 match server.handle_info(payload, state, &ctx).await {
                     InfoReply::NoReply(new_state) => state = new_state,
                     InfoReply::Stop(reason, final_state) => {
-                        server.terminate(&reason, &final_state).await;
+                        server.terminate(&reason, final_state).await;
                         return ExitReason::Normal;
                     }
                 }
@@ -211,7 +211,7 @@ async fn gen_server_loop<S: GenServer>(
                 match server.handle_info(payload, state, &ctx).await {
                     InfoReply::NoReply(new_state) => state = new_state,
                     InfoReply::Stop(reason, final_state) => {
-                        server.terminate(&reason, &final_state).await;
+                        server.terminate(&reason, final_state).await;
                         return ExitReason::Normal;
                     }
                 }
@@ -219,7 +219,7 @@ async fn gen_server_loop<S: GenServer>(
         }
     }
 
-    server.terminate("normal", &state).await;
+    server.terminate("normal", state).await;
     ExitReason::Normal
 }
 
@@ -361,14 +361,16 @@ pub fn child_entry<S: GenServer + Clone>(
         let server = server.clone();
         let args = args.clone();
         async move {
+            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
             let server = Arc::new(server);
-            let pid = runtime.spawn(move |ctx| async move {
-                gen_server_loop(server, args, ctx).await;
+            runtime.spawn(move |ctx| async move {
+                let reason = gen_server_loop(server, args, ctx).await;
+                let _ = exit_tx.send(reason);
             }).await;
-            while runtime.is_alive(pid) {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            match exit_rx.await {
+                Ok(reason) => reason,
+                Err(_) => ExitReason::Abnormal("process dropped without sending exit reason".into()),
             }
-            ExitReason::Normal
         }
     })
 }
@@ -721,5 +723,104 @@ mod tests {
         let spec = ChildSpec::new("counter");
         let entry = child_entry(rt, CounterServer, rmpv::Value::Integer(0u64.into()), spec);
         assert_eq!(entry.spec.id, "counter");
+    }
+
+    // 16. raw_malformed_call_envelope
+    #[tokio::test]
+    async fn raw_malformed_call_envelope() {
+        // Send a $gs:call envelope missing the "ref" field directly to the server.
+        // The server should still process it (ref_id defaults to 0).
+        let rt = new_runtime();
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
+
+        // Manually construct a call envelope without "ref"
+        let malformed = rmpv::Value::Map(vec![
+            (rmpv::Value::String("$gs".into()), rmpv::Value::String("call".into())),
+            (rmpv::Value::String("req".into()), rmpv::Value::String("increment".into())),
+        ]);
+        rt.send(pid, malformed).await.unwrap();
+
+        // The server should process the call (increment) but the reply goes to PID(node,0)
+        // which is the runtime's synthetic sender. The server should NOT crash.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify server is still alive and state was updated
+        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
+        assert_eq!(reply.as_u64().unwrap(), 1);
+    }
+
+    // 17. child_entry_propagates_abnormal_exit
+    #[tokio::test]
+    async fn child_entry_propagates_abnormal_exit() {
+        #[derive(Clone)]
+        struct FailInitServer;
+
+        #[async_trait]
+        impl GenServer for FailInitServer {
+            type State = ();
+            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+                Err("init failed".into())
+            }
+            async fn handle_call(&self, _req: rmpv::Value, _from: From, s: (), _ctx: &GenServerContext) -> CallReply<()> {
+                CallReply::Reply(rmpv::Value::Nil, s)
+            }
+            async fn handle_cast(&self, _req: rmpv::Value, s: (), _ctx: &GenServerContext) -> CastReply<()> {
+                CastReply::NoReply(s)
+            }
+        }
+
+        let rt = Arc::new(Runtime::new(1));
+        let spec = ChildSpec::new("fail_init");
+        let entry = child_entry(Arc::clone(&rt), FailInitServer, rmpv::Value::Nil, spec);
+
+        // Run the factory directly
+        let reason = (entry.factory)().await;
+        assert!(matches!(reason, ExitReason::Abnormal(ref msg) if msg == "init failed"),
+            "expected Abnormal(\"init failed\"), got {:?}", reason);
+    }
+
+    // 18. child_entry_propagates_normal_exit
+    #[tokio::test]
+    async fn child_entry_propagates_normal_exit() {
+        #[derive(Clone)]
+        struct QuickStopServer;
+
+        #[async_trait]
+        impl GenServer for QuickStopServer {
+            type State = ();
+            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+                Ok(())
+            }
+            async fn handle_call(&self, _req: rmpv::Value, _from: From, s: (), _ctx: &GenServerContext) -> CallReply<()> {
+                CallReply::Reply(rmpv::Value::Nil, s)
+            }
+            async fn handle_cast(&self, request: rmpv::Value, s: (), _ctx: &GenServerContext) -> CastReply<()> {
+                if request.as_str() == Some("stop") {
+                    CastReply::Stop("done".into(), s)
+                } else {
+                    CastReply::NoReply(s)
+                }
+            }
+        }
+
+        let rt = Arc::new(Runtime::new(1));
+        let spec = ChildSpec::new("quick_stop");
+        let entry = child_entry(Arc::clone(&rt), QuickStopServer, rmpv::Value::Nil, spec);
+        let factory = entry.factory.clone();
+
+        let handle = tokio::spawn(async move {
+            factory().await
+        });
+
+        // Wait for the server to start, then find and stop it
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pids = rt.list_processes();
+        if let Some(&pid) = pids.last() {
+            let _ = cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).await;
+        }
+
+        let reason = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await.expect("should complete").expect("should not panic");
+        assert!(matches!(reason, ExitReason::Normal));
     }
 }
