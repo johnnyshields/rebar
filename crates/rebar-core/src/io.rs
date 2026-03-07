@@ -221,7 +221,7 @@ impl TcpStream {
     pub async fn write_all(&self, buf: Vec<u8>) -> BufResult<(), Vec<u8>> {
         let mut written = 0;
         let total = buf.len();
-        let mut buf = buf;
+        let buf = buf;
         while written < total {
             let slice = buf[written..].to_vec();
             let BufResult(result, _) = self.write(slice).await;

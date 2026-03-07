@@ -1180,6 +1180,7 @@ dependencies = [
 [[package]]
 name = "turbine-core"
 version = "0.1.0"
+source = "git+https://github.com/johnnyshields/turbine.git?branch=master#656891e1065b0743bde41aac855d67622dfd84e1"
 dependencies = [
  "crossbeam-channel",
  "io-uring 0.7.11",

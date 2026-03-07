@@ -9,7 +9,7 @@ description = "Core actor primitives and supervision for the Rebar runtime"
 [dependencies]
 compio-buf = "0.8"
 compio-driver = "0.11"
-turbine-core = { path = "/mnt/c/workspace/turbine/crates/turbine-core" }
+turbine-core = { git = "https://github.com/johnnyshields/turbine.git", branch = "master" }
 socket2 = { version = "0.5", features = ["all"] }
 futures = "0.3"
 local-sync = "0.1"
