@@ -1,8 +1,15 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::process::mailbox::MailboxTx;
 use crate::process::{Message, ProcessId, RegistryError, SendError};
+
+/// Global (cross-thread) named process registry.
+///
+/// Shared across all threads via `Arc`. Uses `RwLock` for thread-safe access.
+/// Maps name -> (thread_id, ProcessId).
+pub type GlobalRegistry = Arc<RwLock<HashMap<String, (u16, ProcessId)>>>;
 
 /// Handle to a process, wrapping the mailbox sender.
 ///
@@ -40,6 +47,7 @@ pub struct ProcessTable {
     next_id: Cell<u64>,
     processes: RefCell<HashMap<ProcessId, ProcessHandle>>,
     names: RefCell<HashMap<String, ProcessId>>,
+    global_registry: Option<GlobalRegistry>,
 }
 
 impl ProcessTable {
@@ -51,7 +59,14 @@ impl ProcessTable {
             next_id: Cell::new(1),
             processes: RefCell::new(HashMap::new()),
             names: RefCell::new(HashMap::new()),
+            global_registry: None,
         }
+    }
+
+    /// Attach a global registry for cross-thread name lookups.
+    pub fn with_global_registry(mut self, registry: GlobalRegistry) -> Self {
+        self.global_registry = Some(registry);
+        self
     }
 
     /// Allocate a new unique process ID on this node/thread.
@@ -136,8 +151,52 @@ impl ProcessTable {
     }
 
     /// Look up a PID by its registered name.
+    ///
+    /// Checks the local registry first, then falls back to the global registry
+    /// if one is attached.
     pub fn whereis(&self, name: &str) -> Option<ProcessId> {
-        self.names.borrow().get(name).copied()
+        if let Some(pid) = self.names.borrow().get(name).copied() {
+            return Some(pid);
+        }
+        if let Some(ref global) = self.global_registry {
+            if let Ok(map) = global.read() {
+                return map.get(name).map(|(_tid, pid)| *pid);
+            }
+        }
+        None
+    }
+
+    /// Register a name in the global (cross-thread) registry.
+    ///
+    /// Returns an error if no global registry is attached or the name is
+    /// already taken.
+    pub fn register_global(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
+        let global = self
+            .global_registry
+            .as_ref()
+            .ok_or_else(|| RegistryError::NameNotFound("no global registry".to_string()))?;
+        let mut map = global.write().map_err(|_| {
+            RegistryError::NameNotFound("global registry lock poisoned".to_string())
+        })?;
+        if map.contains_key(&name) {
+            return Err(RegistryError::NameAlreadyRegistered(name));
+        }
+        map.insert(name, (self.thread_id, pid));
+        Ok(())
+    }
+
+    /// Unregister a name from the global (cross-thread) registry.
+    pub fn unregister_global(&self, name: &str) -> Result<ProcessId, RegistryError> {
+        let global = self
+            .global_registry
+            .as_ref()
+            .ok_or_else(|| RegistryError::NameNotFound("no global registry".to_string()))?;
+        let mut map = global.write().map_err(|_| {
+            RegistryError::NameNotFound("global registry lock poisoned".to_string())
+        })?;
+        map.remove(name)
+            .map(|(_tid, pid)| pid)
+            .ok_or_else(|| RegistryError::NameNotFound(name.to_string()))
     }
 
     /// Return the number of processes currently in the table.

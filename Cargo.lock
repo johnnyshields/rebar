@@ -561,6 +561,7 @@ name = "rebar-core"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "libc",
  "local-sync",
  "monoio",
  "rmpv",

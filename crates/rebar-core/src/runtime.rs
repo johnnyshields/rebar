@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use crate::process::mailbox::{Mailbox, MailboxRx};
@@ -8,13 +10,57 @@ use crate::process::table::{ProcessHandle, ProcessTable};
 use crate::process::{Message, ProcessId, RegistryError, SendError};
 use crate::router::{LocalRouter, MessageRouter};
 
+/// Shared shutdown state with waker support for zero-latency cancellation.
+struct ShutdownState {
+    flag: Cell<bool>,
+    waker: Cell<Option<Waker>>,
+}
+
+impl ShutdownState {
+    fn new() -> Self {
+        Self {
+            flag: Cell::new(false),
+            waker: Cell::new(None),
+        }
+    }
+
+    fn shutdown(&self) {
+        self.flag.set(true);
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.flag.get()
+    }
+}
+
+/// Future that resolves when the runtime begins shutting down.
+struct CancelledFuture<'a> {
+    state: &'a ShutdownState,
+}
+
+impl Future for CancelledFuture<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.state.is_shutting_down() {
+            Poll::Ready(())
+        } else {
+            self.state.waker.set(Some(cx.waker().clone()));
+            Poll::Pending
+        }
+    }
+}
+
 /// Context provided to each spawned process, giving it access to its own
 /// PID, mailbox, and the ability to send messages to other processes.
 pub struct ProcessContext {
     pid: ProcessId,
     rx: MailboxRx,
     router: Rc<dyn MessageRouter>,
-    shutdown: Rc<Cell<bool>>,
+    shutdown: Rc<ShutdownState>,
 }
 
 impl ProcessContext {
@@ -50,16 +96,18 @@ impl ProcessContext {
 
     /// Returns `true` if the runtime is shutting down.
     pub fn is_shutting_down(&self) -> bool {
-        self.shutdown.get()
+        self.shutdown.is_shutting_down()
     }
 
     /// Returns a future that completes when the runtime begins shutting down.
     ///
-    /// Useful in `monoio::select!` to react to shutdown.
+    /// Useful in `monoio::select!` to react to shutdown. Uses a proper waker
+    /// pattern — no polling loop.
     pub async fn cancelled(&self) {
-        while !self.shutdown.get() {
-            monoio::time::sleep(Duration::from_millis(10)).await;
+        CancelledFuture {
+            state: &self.shutdown,
         }
+        .await
     }
 }
 
@@ -73,7 +121,7 @@ pub struct Runtime {
     thread_id: u16,
     table: Rc<ProcessTable>,
     router: Rc<dyn MessageRouter>,
-    shutdown: Rc<Cell<bool>>,
+    shutdown: Rc<ShutdownState>,
     default_mailbox_capacity: Option<usize>,
 }
 
@@ -87,7 +135,21 @@ impl Runtime {
             thread_id: 0,
             table,
             router,
-            shutdown: Rc::new(Cell::new(false)),
+            shutdown: Rc::new(ShutdownState::new()),
+            default_mailbox_capacity: None,
+        }
+    }
+
+    /// Create a new runtime for the given node ID and thread ID.
+    pub fn with_thread_id(node_id: u64, thread_id: u16) -> Self {
+        let table = Rc::new(ProcessTable::new(node_id, thread_id));
+        let router = Rc::new(LocalRouter::new(Rc::clone(&table)));
+        Self {
+            node_id,
+            thread_id,
+            table,
+            router,
+            shutdown: Rc::new(ShutdownState::new()),
             default_mailbox_capacity: None,
         }
     }
@@ -103,7 +165,7 @@ impl Runtime {
             thread_id: 0,
             table,
             router,
-            shutdown: Rc::new(Cell::new(false)),
+            shutdown: Rc::new(ShutdownState::new()),
             default_mailbox_capacity: None,
         }
     }
@@ -212,8 +274,10 @@ impl Runtime {
     }
 
     /// Signal the runtime to shut down.
+    ///
+    /// Immediately wakes any future waiting on `ProcessContext::cancelled()`.
     pub fn shutdown(&self) {
-        self.shutdown.set(true);
+        self.shutdown.shutdown();
     }
 }
 
