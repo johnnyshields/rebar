@@ -41,7 +41,8 @@ impl Default for ExecutorConfig {
 /// Single-threaded cooperative task scheduler with a compio Proactor event loop
 /// and optional turbine buffer pool.
 ///
-/// This is `!Send` — it lives on one thread for the thread-per-core model.
+/// `!Send` by design — each OS thread in the thread-per-core model owns
+/// exactly one executor.
 pub struct RebarExecutor {
     proactor: RefCell<Proactor>,
     pool: Option<IouringBufferPool<NoopHooks>>,

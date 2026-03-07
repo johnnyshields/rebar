@@ -113,8 +113,8 @@ impl ProcessContext {
 
 /// The Rebar runtime, responsible for spawning processes and routing messages.
 ///
-/// In the thread-per-core model, the Runtime lives on a single thread
-/// and uses `Rc` for shared ownership. All methods are synchronous (no `.await`).
+/// In the thread-per-core model, each OS thread owns its own Runtime via `Rc`.
+/// Uses `Rc` for shared ownership — `!Send` by design. All methods are synchronous.
 pub struct Runtime {
     node_id: u64,
     #[allow(dead_code)]
@@ -194,8 +194,9 @@ impl Runtime {
     /// The handler receives a `ProcessContext` and can use it to send/receive
     /// messages. Returns the new process's PID.
     ///
-    /// Note: In the thread-per-core model, spawn is synchronous.
-    /// The handler and future need only be `'static`, not `Send`.
+    /// In the thread-per-core model, spawn is synchronous — it allocates the
+    /// PID, inserts into the process table, and enqueues the task on the local
+    /// executor. The future need only be `'static`, not `Send`.
     pub fn spawn<F, Fut>(&self, handler: F) -> ProcessId
     where
         F: FnOnce(ProcessContext) -> Fut + 'static,

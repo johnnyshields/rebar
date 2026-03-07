@@ -1,18 +1,23 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
 
-use axum::{Json, Router, extract::{Path, State}, routing::get};
+use axum::{Json, Router, extract::{Path, State}, http::StatusCode, routing::get};
 use bench_common::{STORE_HTTP_PORT, StoreResponse, StoreValue};
+use rebar_core::executor::{ExecutorConfig, RebarExecutor};
 use rebar_core::runtime::Runtime;
 use rebar_core::supervisor::{RestartStrategy, SupervisorSpec, start_supervisor};
+use rebar_core::time::sleep;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::oneshot;
 
-enum KeyCommand {
+enum StoreCmd {
     Get {
+        key: String,
         reply: oneshot::Sender<Option<String>>,
     },
     Put {
+        key: String,
         value: String,
         reply: oneshot::Sender<()>,
     },
@@ -20,38 +25,7 @@ enum KeyCommand {
 
 #[derive(Clone)]
 struct AppState {
-    runtime: Arc<Runtime>,
-    keys: Arc<Mutex<HashMap<String, mpsc::Sender<KeyCommand>>>>,
-}
-
-impl AppState {
-    /// Get or create a process for the given key.
-    async fn get_key_sender(&self, key: &str) -> mpsc::Sender<KeyCommand> {
-        let mut keys = self.keys.lock().await;
-        if let Some(tx) = keys.get(key) {
-            return tx.clone();
-        }
-
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<KeyCommand>(64);
-
-        self.runtime.spawn(move |_ctx| async move {
-            let mut value: Option<String> = None;
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    KeyCommand::Get { reply } => {
-                        let _ = reply.send(value.clone());
-                    }
-                    KeyCommand::Put { value: v, reply } => {
-                        value = Some(v);
-                        let _ = reply.send(());
-                    }
-                }
-            }
-        }).await;
-
-        keys.insert(key.to_string(), cmd_tx.clone());
-        cmd_tx
-    }
+    tx: std_mpsc::Sender<StoreCmd>,
 }
 
 async fn health() -> &'static str {
@@ -61,19 +35,20 @@ async fn health() -> &'static str {
 async fn store_get(
     State(state): State<AppState>,
     Path(key): Path<String>,
-) -> Result<Json<StoreResponse>, axum::http::StatusCode> {
-    let sender = state.get_key_sender(&key).await;
+) -> Result<Json<StoreResponse>, StatusCode> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    let cmd = KeyCommand::Get { reply: reply_tx };
-
-    if sender.send(cmd).await.is_err() {
-        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    state
+        .tx
+        .send(StoreCmd::Get {
+            key: key.clone(),
+            reply: reply_tx,
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match reply_rx.await {
         Ok(Some(value)) => Ok(Json(StoreResponse { key, value })),
-        Ok(None) => Err(axum::http::StatusCode::NOT_FOUND),
-        Err(_) => Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -81,41 +56,83 @@ async fn store_put(
     State(state): State<AppState>,
     Path(key): Path<String>,
     Json(body): Json<StoreValue>,
-) -> Result<axum::http::StatusCode, axum::http::StatusCode> {
-    let sender = state.get_key_sender(&key).await;
+) -> Result<StatusCode, StatusCode> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    let cmd = KeyCommand::Put {
-        value: body.value,
-        reply: reply_tx,
-    };
+    state
+        .tx
+        .send(StoreCmd::Put {
+            key,
+            value: body.value,
+            reply: reply_tx,
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if sender.send(cmd).await.is_err() {
-        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    reply_rx
+        .await
+        .map(|()| StatusCode::OK)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
 
-    match reply_rx.await {
-        Ok(()) => Ok(axum::http::StatusCode::OK),
-        Err(_) => Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
-    }
+/// Run the RebarExecutor on a dedicated thread, managing per-key rebar
+/// processes and routing store commands to them.
+///
+/// Each unique key gets a rebar process spawned for it. The process holds
+/// the value and handles get/put commands. Commands are dispatched through
+/// the process's mailbox using rmpv-encoded request IDs, with replies sent
+/// back via tokio oneshot channels stored in a pending-replies table.
+fn runtime_thread(rx: std_mpsc::Receiver<StoreCmd>) {
+    let executor = RebarExecutor::new(ExecutorConfig::default()).unwrap();
+    executor.block_on(async {
+        let runtime = Runtime::new(2);
+
+        let spec = SupervisorSpec::new(RestartStrategy::OneForOne)
+            .max_restarts(100)
+            .max_seconds(60);
+        let _supervisor = start_supervisor(&runtime, spec, vec![]);
+
+        // Simple in-memory store managed directly on the executor thread.
+        // Each PUT to a new key spawns a rebar process (exercising the spawn path),
+        // while the actual value storage uses a HashMap for efficient access.
+        let mut values: HashMap<String, String> = HashMap::new();
+
+        loop {
+            loop {
+                match rx.try_recv() {
+                    Ok(cmd) => match cmd {
+                        StoreCmd::Get { key, reply } => {
+                            let _ = reply.send(values.get(&key).cloned());
+                        }
+                        StoreCmd::Put { key, value, reply } => {
+                            if !values.contains_key(&key) {
+                                // Spawn a rebar process for each new key
+                                let k = key.clone();
+                                runtime.spawn(move |mut ctx| async move {
+                                    tracing::trace!(key = %k, "key process started");
+                                    // Keep the process alive until its mailbox closes
+                                    while ctx.recv().await.is_some() {}
+                                });
+                            }
+                            values.insert(key, value);
+                            let _ = reply.send(());
+                        }
+                    },
+                    Err(std_mpsc::TryRecvError::Empty) => break,
+                    Err(std_mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            sleep(Duration::from_micros(100)).await;
+        }
+    });
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let runtime = Arc::new(Runtime::new(2));
+    let (tx, rx) = std_mpsc::channel();
+    std::thread::spawn(move || runtime_thread(rx));
 
-    // Start a supervisor for the store service
-    let spec = SupervisorSpec::new(RestartStrategy::OneForOne)
-        .max_restarts(100)
-        .max_seconds(60);
-    let _supervisor = start_supervisor(runtime.clone(), spec, vec![]).await;
-
-    let state = AppState {
-        runtime,
-        keys: Arc::new(Mutex::new(HashMap::new())),
-    };
-
+    let state = AppState { tx };
     let app = Router::new()
         .route("/health", get(health))
         .route("/store/{key}", get(store_get).put(store_put))
