@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
@@ -10,11 +10,67 @@ use compio_buf::IntoInner;
 use compio_driver::op;
 use compio_driver::{Key, PushEntry, SharedFd};
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use turbine_core::buffer::leased::LeasedBuffer;
 
 use crate::executor;
 
 /// Result type for buffer-ownership I/O operations.
 pub use compio_buf::BufResult;
+
+// ---------------------------------------------------------------------------
+// LeaseIoBuf — compio buffer trait adapter for turbine's LeasedBuffer
+// ---------------------------------------------------------------------------
+
+/// Wrapper that implements compio's buffer traits for turbine's `LeasedBuffer`.
+///
+/// This enables zero-copy reads where the kernel writes directly into
+/// epoch-arena memory, avoiding per-read allocator calls.
+pub struct LeaseIoBuf {
+    lease: LeasedBuffer,
+    /// Tracks bytes initialized by the kernel (starts at 0).
+    init_len: usize,
+}
+
+impl LeaseIoBuf {
+    /// Wrap a `LeasedBuffer` for use with compio I/O operations.
+    pub fn new(lease: LeasedBuffer) -> Self {
+        Self { lease, init_len: 0 }
+    }
+
+    /// Consume the wrapper and return the inner `LeasedBuffer`.
+    pub fn into_inner(self) -> LeasedBuffer {
+        self.lease
+    }
+
+    /// Number of bytes initialized by the kernel after a read.
+    pub fn bytes_read(&self) -> usize {
+        self.init_len
+    }
+}
+
+impl compio_buf::IoBuf for LeaseIoBuf {
+    fn as_init(&self) -> &[u8] {
+        &self.lease.as_slice()[..self.init_len]
+    }
+}
+
+impl compio_buf::SetLen for LeaseIoBuf {
+    unsafe fn set_len(&mut self, len: usize) {
+        self.init_len = len;
+    }
+}
+
+impl compio_buf::IoBufMut for LeaseIoBuf {
+    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // Return FULL capacity — kernel writes into this region.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.lease.as_mut_slice().as_mut_ptr() as *mut MaybeUninit<u8>,
+                self.lease.len(), // full arena allocation, not init_len
+            )
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // OpFuture — submit a compio op to the proactor and await completion
@@ -239,10 +295,25 @@ impl TcpStream {
         BufResult(Ok(()), buf)
     }
 
+    /// Read into a `LeasedBuffer` (zero-copy from epoch arena).
+    ///
+    /// Returns `(bytes_read, LeasedBuffer)`. The caller can inspect
+    /// `lease.as_slice()[..n]` for the data read by the kernel.
+    pub async fn read_lease(&self, lease: LeasedBuffer) -> BufResult<usize, LeasedBuffer> {
+        let wrapper = LeaseIoBuf::new(lease);
+        let recv_op = op::Recv::new(self.fd.clone(), wrapper, 0);
+        let BufResult(result, completed_op) = submit(recv_op).await;
+        let mut wrapper = completed_op.into_inner();
+        if let Ok(n) = &result {
+            unsafe { compio_buf::SetLen::set_len(&mut wrapper, *n); }
+        }
+        BufResult(result, wrapper.into_inner())
+    }
+
     /// Convenience: read up to `len` bytes, returning them as a `Vec<u8>`.
     ///
-    /// Uses a freshly allocated buffer. For zero-copy reads via turbine
-    /// `LeasedBuffer`, a future `read_lease` method will be added.
+    /// Uses a freshly allocated buffer. For zero-copy reads, use
+    /// [`read_lease`](Self::read_lease) with a turbine `LeasedBuffer`.
     pub async fn read_exact_alloc(&self, len: usize) -> io::Result<Vec<u8>> {
         let buf = Vec::with_capacity(len);
         let BufResult(result, buf) = self.read(buf).await;
@@ -271,9 +342,18 @@ impl TcpStream {
 mod tests {
     use super::*;
     use crate::executor::{ExecutorConfig, RebarExecutor};
+    use turbine_core::config::PoolConfig;
 
     fn test_executor() -> RebarExecutor {
         RebarExecutor::new(ExecutorConfig::default()).unwrap()
+    }
+
+    fn test_executor_with_pool() -> RebarExecutor {
+        RebarExecutor::new(ExecutorConfig {
+            pool_config: Some(PoolConfig::default()),
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -335,6 +415,80 @@ mod tests {
             assert_eq!(&buf[..n], b"hello");
 
             echo.await;
+        });
+    }
+
+    #[test]
+    fn tcp_stream_echo_with_leased_buffer() {
+        let ex = test_executor_with_pool();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            // Server: accept, read via leased buffer, echo back.
+            let echo = crate::executor::spawn(async move {
+                let (stream, _peer) = listener.accept().await.unwrap();
+                let lease = crate::executor::with_buffer_pool(|pool| pool.lease(8192))
+                    .expect("pool should be configured")
+                    .expect("lease should succeed");
+                let BufResult(result, lease) = stream.read_lease(lease).await;
+                let n = result.unwrap();
+                let data = lease.as_slice()[..n].to_vec();
+                drop(lease); // Release lease back to arena
+                let BufResult(result, _) = stream.write(data).await;
+                result.unwrap();
+            });
+
+            // Client: connect, write, read echo.
+            let client_sock =
+                Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+            client_sock.set_nonblocking(true).unwrap();
+            let _ = client_sock.connect(&addr.into());
+            let client_fd = OwnedFd::from(client_sock);
+            executor::with_executor(|ex| {
+                ex.proactor().borrow_mut().attach(client_fd.as_raw_fd())
+            })
+            .unwrap();
+            let client = TcpStream {
+                fd: SharedFd::new(client_fd),
+            };
+
+            crate::executor::spawn(async {}).await;
+
+            let msg = b"hello leased".to_vec();
+            let BufResult(result, _) = client.write(msg).await;
+            result.unwrap();
+
+            let buf = Vec::with_capacity(64);
+            let BufResult(result, buf) = client.read(buf).await;
+            let n = result.unwrap();
+            assert_eq!(&buf[..n], b"hello leased");
+
+            echo.await;
+        });
+    }
+
+    #[test]
+    fn lease_io_buf_traits() {
+        let ex = test_executor_with_pool();
+        ex.block_on(async {
+            let lease = crate::executor::with_buffer_pool(|pool| pool.lease(4096))
+                .expect("pool configured")
+                .expect("lease ok");
+            let len = lease.len();
+            let mut wrapper = LeaseIoBuf::new(lease);
+
+            // Initially no bytes read
+            assert_eq!(wrapper.bytes_read(), 0);
+            assert_eq!(compio_buf::IoBuf::as_init(&wrapper).len(), 0);
+
+            // Full capacity available for kernel writes
+            assert_eq!(compio_buf::IoBufMut::as_uninit(&mut wrapper).len(), len);
+
+            // Simulate kernel writing 5 bytes
+            unsafe { compio_buf::SetLen::set_len(&mut wrapper, 5); }
+            assert_eq!(wrapper.bytes_read(), 5);
+            assert_eq!(compio_buf::IoBuf::as_init(&wrapper).len(), 5);
         });
     }
 }

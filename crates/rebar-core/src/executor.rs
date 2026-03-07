@@ -251,6 +251,14 @@ pub fn try_with_executor<R>(f: impl FnOnce(&RebarExecutor) -> R) -> Option<R> {
     })
 }
 
+/// Access the thread's buffer pool via callback, if configured.
+///
+/// Returns `None` if no executor is active or no pool is configured.
+/// The closure borrows the pool for a bounded scope within `block_on()`.
+pub fn with_buffer_pool<R>(f: impl FnOnce(&IouringBufferPool<NoopHooks>) -> R) -> Option<R> {
+    try_with_executor(|ex| ex.pool().map(|p| f(p))).flatten()
+}
+
 /// Create a waker that sets the given flag to `true` when woken.
 /// Used for the root future in `block_on` so the event loop knows
 /// the root future has new progress and shouldn't block.
@@ -422,6 +430,34 @@ mod tests {
     #[test]
     fn try_with_executor_returns_none_outside() {
         let result = try_with_executor(|_| 42);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn with_buffer_pool_returns_none_when_no_pool() {
+        let ex = test_executor(); // default config has pool_config: None
+        ex.block_on(async {
+            let result = with_buffer_pool(|_pool| 42);
+            assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn with_buffer_pool_returns_some_when_configured() {
+        let ex = RebarExecutor::new(ExecutorConfig {
+            pool_config: Some(turbine_core::config::PoolConfig::default()),
+            ..Default::default()
+        })
+        .unwrap();
+        ex.block_on(async {
+            let result = with_buffer_pool(|pool| pool.epoch());
+            assert!(result.is_some());
+        });
+    }
+
+    #[test]
+    fn with_buffer_pool_returns_none_outside_block_on() {
+        let result = with_buffer_pool(|_| 42);
         assert!(result.is_none());
     }
 

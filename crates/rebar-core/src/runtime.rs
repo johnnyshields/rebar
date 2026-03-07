@@ -99,6 +99,16 @@ impl ProcessContext {
         self.shutdown.is_shutting_down()
     }
 
+    /// Access the thread's buffer pool via callback, if configured.
+    ///
+    /// Delegates to [`crate::executor::with_buffer_pool`].
+    pub fn with_buffer_pool<R>(
+        &self,
+        f: impl FnOnce(&turbine_core::buffer::pool::IouringBufferPool<turbine_core::gc::NoopHooks>) -> R,
+    ) -> Option<R> {
+        crate::executor::with_buffer_pool(f)
+    }
+
     /// Returns a future that completes when the runtime begins shutting down.
     ///
     /// Useful in `select!` to react to shutdown. Uses a proper waker
