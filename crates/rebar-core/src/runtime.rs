@@ -204,6 +204,17 @@ impl Runtime {
         self.router.route(from, dest, payload)
     }
 
+    /// Send a message with an ack channel that is signaled after processing.
+    pub async fn send_with_ack(
+        &self,
+        dest: ProcessId,
+        payload: rmpv::Value,
+        ack: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), SendError> {
+        let from = ProcessId::new(self.node_id, 0);
+        self.router.route_with_ack(from, dest, payload, ack)
+    }
+
     /// Register a name for a process.
     pub fn register(&self, name: String, pid: ProcessId) -> Result<(), RegistryError> {
         self.table.register_name(name, pid)

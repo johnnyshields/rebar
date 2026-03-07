@@ -27,11 +27,33 @@ impl fmt::Display for ProcessId {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct Message {
     from: ProcessId,
     payload: rmpv::Value,
     timestamp: u64,
+    ack: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("from", &self.from)
+            .field("payload", &self.payload)
+            .field("timestamp", &self.timestamp)
+            .field("ack", &self.ack.is_some())
+            .finish()
+    }
+}
+
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        Self {
+            from: self.from,
+            payload: self.payload.clone(),
+            timestamp: self.timestamp,
+            ack: None,
+        }
+    }
 }
 
 impl Message {
@@ -44,6 +66,20 @@ impl Message {
             from,
             payload,
             timestamp,
+            ack: None,
+        }
+    }
+
+    pub fn with_ack(from: ProcessId, payload: rmpv::Value, ack: tokio::sync::oneshot::Sender<()>) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        Self {
+            from,
+            payload,
+            timestamp,
+            ack: Some(ack),
         }
     }
 
@@ -57,6 +93,10 @@ impl Message {
 
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+
+    pub fn take_ack(&mut self) -> Option<tokio::sync::oneshot::Sender<()>> {
+        self.ack.take()
     }
 }
 

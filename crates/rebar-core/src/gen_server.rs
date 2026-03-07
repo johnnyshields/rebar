@@ -161,7 +161,7 @@ async fn gen_server_loop<S: GenServer>(
         Err(reason) => return ExitReason::Abnormal(reason),
     };
 
-    while let Some(msg) = process_ctx.recv().await {
+    while let Some(mut msg) = process_ctx.recv().await {
         let payload = msg.payload().clone();
         match extract_gs_type(&payload) {
             Some("call") => {
@@ -188,15 +188,18 @@ async fn gen_server_loop<S: GenServer>(
             }
             Some("cast") => {
                 let request = extract_field(&payload, "req").unwrap_or(rmpv::Value::Nil);
+                let ack = msg.take_ack();
                 match server.handle_cast(request, state, &ctx).await {
                     CastReply::NoReply(new_state) => {
                         state = new_state;
                     }
                     CastReply::Stop(reason, final_state) => {
+                        if let Some(tx) = ack { let _ = tx.send(()); }
                         server.terminate(&reason, final_state).await;
                         return ExitReason::Normal;
                     }
                 }
+                if let Some(tx) = ack { let _ = tx.send(()); }
             }
             Some("reply") => {
                 match server.handle_info(payload, state, &ctx).await {
@@ -333,6 +336,22 @@ pub async fn cast_from_runtime(
         (rmpv::Value::String("req".into()), request),
     ]);
     runtime.send(dest, envelope).await
+}
+
+/// Cast from outside any process, returning a receiver that is signaled
+/// when the GenServer finishes processing the cast (after `handle_cast` returns).
+pub async fn cast_from_runtime_ack(
+    runtime: &Runtime,
+    dest: ProcessId,
+    request: rmpv::Value,
+) -> Result<tokio::sync::oneshot::Receiver<()>, SendError> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let envelope = rmpv::Value::Map(vec![
+        (rmpv::Value::String("$gs".into()), rmpv::Value::String("cast".into())),
+        (rmpv::Value::String("req".into()), request),
+    ]);
+    runtime.send_with_ack(dest, envelope, ack_tx).await?;
+    Ok(ack_rx)
 }
 
 /// Reply to a From (for deferred replies outside the GenServer callbacks).

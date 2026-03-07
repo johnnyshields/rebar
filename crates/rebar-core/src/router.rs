@@ -6,6 +6,19 @@ use std::sync::Arc;
 /// Implementations decide whether to deliver locally or over the network.
 pub trait MessageRouter: Send + Sync {
     fn route(&self, from: ProcessId, to: ProcessId, payload: rmpv::Value) -> Result<(), SendError>;
+
+    /// Route a message with an ack channel that is signaled after the receiver processes it.
+    ///
+    /// Default implementation drops the ack and delegates to `route()`.
+    fn route_with_ack(
+        &self,
+        from: ProcessId,
+        to: ProcessId,
+        payload: rmpv::Value,
+        _ack: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), SendError> {
+        self.route(from, to, payload)
+    }
 }
 
 /// Default router that delivers messages to the local ProcessTable.
@@ -22,6 +35,17 @@ impl LocalRouter {
 impl MessageRouter for LocalRouter {
     fn route(&self, from: ProcessId, to: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         let msg = Message::new(from, payload);
+        self.table.send(to, msg)
+    }
+
+    fn route_with_ack(
+        &self,
+        from: ProcessId,
+        to: ProcessId,
+        payload: rmpv::Value,
+        ack: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), SendError> {
+        let msg = Message::with_ack(from, payload, ack);
         self.table.send(to, msg)
     }
 }
