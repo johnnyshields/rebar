@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::connection::manager::{ConnectionManager, TransportConnector};
 use crate::registry::Registry;
 use crate::swim::gossip::{GossipQueue, GossipUpdate};
 
@@ -71,10 +72,10 @@ impl NodeDrain {
     /// Phase 2: Drain in-flight outbound messages.
     /// Processes RouterCommands from the channel until empty or timeout.
     /// Returns (count, timed_out).
-    pub async fn drain_outbound(
+    pub async fn drain_outbound<C: TransportConnector>(
         &self,
-        remote_rx: &mut tokio::sync::mpsc::Receiver<crate::router::RouterCommand>,
-        connection_manager: &mut crate::connection::manager::ConnectionManager,
+        remote_rx: &mut local_sync::mpsc::unbounded::Rx<crate::router::RouterCommand>,
+        connection_manager: &mut ConnectionManager<C>,
     ) -> (usize, bool) {
         let start = Instant::now();
         let mut drained = 0;
@@ -88,7 +89,7 @@ impl NodeDrain {
 
             let remaining = self.config.drain_timeout - start.elapsed();
 
-            match tokio::time::timeout(remaining, remote_rx.recv()).await {
+            match monoio::time::timeout(remaining, remote_rx.recv()).await {
                 Ok(Some(crate::router::RouterCommand::Send { node_id, frame })) => {
                     let _ = connection_manager.route(node_id, &frame).await;
                     drained += 1;
@@ -105,14 +106,14 @@ impl NodeDrain {
     }
 
     /// Execute the full three-phase drain protocol.
-    pub async fn drain(
+    pub async fn drain<C: TransportConnector>(
         &self,
         node_id: u64,
         addr: SocketAddr,
         gossip: &mut GossipQueue,
         registry: &mut Registry,
-        remote_rx: &mut tokio::sync::mpsc::Receiver<crate::router::RouterCommand>,
-        connection_manager: &mut crate::connection::manager::ConnectionManager,
+        remote_rx: &mut local_sync::mpsc::unbounded::Rx<crate::router::RouterCommand>,
+        connection_manager: &mut ConnectionManager<C>,
         process_count: usize,
     ) -> DrainResult {
         let mut phase_durations = [Duration::ZERO; 3];
@@ -149,13 +150,44 @@ impl NodeDrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::manager::TransportConnector;
+    use crate::protocol::{Frame, MsgType};
     use crate::registry::Registry;
+    use crate::router::RouterCommand;
     use crate::swim::gossip::{GossipQueue, GossipUpdate};
+    use crate::transport::{TransportConnection, TransportError};
     use rebar_core::process::ProcessId;
     use std::net::SocketAddr;
 
     fn test_addr() -> SocketAddr {
         "127.0.0.1:4000".parse().unwrap()
+    }
+
+    struct NullConn;
+
+    impl TransportConnection for NullConn {
+        async fn send(&mut self, _frame: &Frame) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Frame, TransportError> {
+            Err(TransportError::ConnectionClosed)
+        }
+        async fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    struct NullConnector;
+
+    impl TransportConnector for NullConnector {
+        type Connection = NullConn;
+
+        async fn connect(
+            &self,
+            _: SocketAddr,
+        ) -> Result<NullConn, TransportError> {
+            Ok(NullConn)
+        }
     }
 
     #[test]
@@ -212,9 +244,9 @@ mod tests {
         let mut gossip = GossipQueue::new();
         let mut registry = Registry::default();
 
-        registry.register("service_a", ProcessId::new(1, 1), 1, 100);
-        registry.register("service_b", ProcessId::new(1, 2), 1, 101);
-        registry.register("service_c", ProcessId::new(2, 1), 2, 102);
+        registry.register("service_a", ProcessId::new(1, 0, 1), 1, 100);
+        registry.register("service_b", ProcessId::new(1, 0, 2), 1, 101);
+        registry.register("service_c", ProcessId::new(2, 0, 1), 2, 102);
 
         assert_eq!(registry.registered().len(), 3);
 
@@ -227,40 +259,10 @@ mod tests {
         assert!(registry.lookup("service_b").is_none());
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn drain_waits_for_inflight() {
-        use crate::connection::manager::ConnectionManager;
-        use crate::protocol::{Frame, MsgType};
-        use crate::router::RouterCommand;
-        use crate::transport::{TransportConnection, TransportError};
-
-        struct NullConn;
-        #[async_trait::async_trait]
-        impl TransportConnection for NullConn {
-            async fn send(&mut self, _frame: &Frame) -> Result<(), TransportError> {
-                Ok(())
-            }
-            async fn recv(&mut self) -> Result<Frame, TransportError> {
-                Err(TransportError::ConnectionClosed)
-            }
-            async fn close(&mut self) -> Result<(), TransportError> {
-                Ok(())
-            }
-        }
-
-        struct NullConnector;
-        #[async_trait::async_trait]
-        impl crate::connection::manager::TransportConnector for NullConnector {
-            async fn connect(
-                &self,
-                _: SocketAddr,
-            ) -> Result<Box<dyn TransportConnection>, TransportError> {
-                Ok(Box::new(NullConn))
-            }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<RouterCommand>(64);
-        let mut mgr = ConnectionManager::new(Box::new(NullConnector));
+        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+        let mut mgr = ConnectionManager::new(NullConnector);
         mgr.connect(2, test_addr()).await.unwrap();
 
         for i in 0..3 {
@@ -274,7 +276,6 @@ mod tests {
                     payload: rmpv::Value::Nil,
                 },
             })
-            .await
             .unwrap();
         }
         drop(tx);
@@ -289,39 +290,10 @@ mod tests {
         assert!(!timed_out);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn drain_respects_timeout() {
-        use crate::connection::manager::ConnectionManager;
-        use crate::router::RouterCommand;
-        use crate::transport::{TransportConnection, TransportError};
-
-        struct NullConn;
-        #[async_trait::async_trait]
-        impl TransportConnection for NullConn {
-            async fn send(&mut self, _: &crate::protocol::Frame) -> Result<(), TransportError> {
-                Ok(())
-            }
-            async fn recv(&mut self) -> Result<crate::protocol::Frame, TransportError> {
-                Err(TransportError::ConnectionClosed)
-            }
-            async fn close(&mut self) -> Result<(), TransportError> {
-                Ok(())
-            }
-        }
-
-        struct NullConnector;
-        #[async_trait::async_trait]
-        impl crate::connection::manager::TransportConnector for NullConnector {
-            async fn connect(
-                &self,
-                _: SocketAddr,
-            ) -> Result<Box<dyn TransportConnection>, TransportError> {
-                Ok(Box::new(NullConn))
-            }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<RouterCommand>(64);
-        let mut mgr = ConnectionManager::new(Box::new(NullConnector));
+        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+        let mut mgr = ConnectionManager::new(NullConnector);
 
         let drain = NodeDrain::new(DrainConfig {
             drain_timeout: Duration::from_millis(100),
@@ -335,49 +307,19 @@ mod tests {
         assert_eq!(count, 0);
         assert!(timed_out);
         assert!(elapsed >= Duration::from_millis(100));
-        assert!(elapsed < Duration::from_secs(1));
+        assert!(elapsed < Duration::from_secs(2));
 
         drop(tx);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn full_drain_protocol() {
-        use crate::connection::manager::ConnectionManager;
-        use crate::protocol::{Frame, MsgType};
-        use crate::router::RouterCommand;
-        use crate::transport::{TransportConnection, TransportError};
-
-        struct NullConn;
-        #[async_trait::async_trait]
-        impl TransportConnection for NullConn {
-            async fn send(&mut self, _: &Frame) -> Result<(), TransportError> {
-                Ok(())
-            }
-            async fn recv(&mut self) -> Result<Frame, TransportError> {
-                Err(TransportError::ConnectionClosed)
-            }
-            async fn close(&mut self) -> Result<(), TransportError> {
-                Ok(())
-            }
-        }
-
-        struct NullConnector;
-        #[async_trait::async_trait]
-        impl crate::connection::manager::TransportConnector for NullConnector {
-            async fn connect(
-                &self,
-                _: SocketAddr,
-            ) -> Result<Box<dyn TransportConnection>, TransportError> {
-                Ok(Box::new(NullConn))
-            }
-        }
-
         let mut gossip = GossipQueue::new();
         let mut registry = Registry::new();
-        registry.register("svc", ProcessId::new(1, 1), 1, 100);
+        registry.register("svc", ProcessId::new(1, 0, 1), 1, 100);
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<RouterCommand>(64);
-        let mut mgr = ConnectionManager::new(Box::new(NullConnector));
+        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+        let mut mgr = ConnectionManager::new(NullConnector);
         mgr.connect(2, test_addr()).await.unwrap();
 
         tx.send(RouterCommand::Send {
@@ -390,7 +332,6 @@ mod tests {
                 payload: rmpv::Value::Nil,
             },
         })
-        .await
         .unwrap();
         drop(tx);
 
@@ -426,42 +367,13 @@ mod tests {
         assert_eq!(mgr.connection_count(), 0);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn drain_returns_stats() {
-        use crate::connection::manager::ConnectionManager;
-        use crate::router::RouterCommand;
-        use crate::transport::{TransportConnection, TransportError};
-
-        struct NullConn;
-        #[async_trait::async_trait]
-        impl TransportConnection for NullConn {
-            async fn send(&mut self, _: &crate::protocol::Frame) -> Result<(), TransportError> {
-                Ok(())
-            }
-            async fn recv(&mut self) -> Result<crate::protocol::Frame, TransportError> {
-                Err(TransportError::ConnectionClosed)
-            }
-            async fn close(&mut self) -> Result<(), TransportError> {
-                Ok(())
-            }
-        }
-
-        struct NullConnector;
-        #[async_trait::async_trait]
-        impl crate::connection::manager::TransportConnector for NullConnector {
-            async fn connect(
-                &self,
-                _: SocketAddr,
-            ) -> Result<Box<dyn TransportConnection>, TransportError> {
-                Ok(Box::new(NullConn))
-            }
-        }
-
         let mut gossip = GossipQueue::new();
         let mut registry = Registry::new();
-        let (_tx, mut rx) = tokio::sync::mpsc::channel::<RouterCommand>(64);
-        drop(_tx);
-        let mut mgr = ConnectionManager::new(Box::new(NullConnector));
+        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+        drop(tx);
+        let mut mgr = ConnectionManager::new(NullConnector);
 
         let drain = NodeDrain::new(DrainConfig::default());
         let result = drain

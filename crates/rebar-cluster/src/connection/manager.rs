@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::protocol::Frame;
-use crate::transport::TransportConnection;
+use crate::transport::{TransportConnection, TransportError};
 
 /// Errors from the ConnectionManager.
 #[derive(Debug, thiserror::Error)]
@@ -59,12 +59,12 @@ impl ReconnectPolicy {
 /// A trait for creating transport connections. This abstraction allows
 /// the ConnectionManager to use different transport implementations
 /// (TCP, QUIC, mock, etc.).
-#[async_trait::async_trait]
-pub trait TransportConnector: Send + Sync {
-    async fn connect(
+pub trait TransportConnector {
+    type Connection: TransportConnection;
+    fn connect(
         &self,
         addr: SocketAddr,
-    ) -> Result<Box<dyn TransportConnection>, crate::transport::TransportError>;
+    ) -> impl Future<Output = Result<Self::Connection, TransportError>>;
 }
 
 /// Manages connections to remote nodes in the cluster.
@@ -73,18 +73,18 @@ pub trait TransportConnector: Send + Sync {
 /// - Connection lifecycle (connect, disconnect, route)
 /// - Event-driven connection management (on_node_discovered, on_connection_lost)
 /// - Reconnection with exponential backoff
-pub struct ConnectionManager {
-    connections: HashMap<u64, Box<dyn TransportConnection>>,
+pub struct ConnectionManager<C: TransportConnector> {
+    connections: HashMap<u64, C::Connection>,
     addresses: HashMap<u64, SocketAddr>,
-    connector: Box<dyn TransportConnector>,
+    connector: C,
     reconnect_policy: ReconnectPolicy,
     events: Vec<ConnectionEvent>,
     reconnect_attempts: HashMap<u64, u32>,
 }
 
-impl ConnectionManager {
+impl<C: TransportConnector> ConnectionManager<C> {
     /// Create a new ConnectionManager with the given transport connector.
-    pub fn new(connector: Box<dyn TransportConnector>) -> Self {
+    pub fn new(connector: C) -> Self {
         Self {
             connections: HashMap::new(),
             addresses: HashMap::new(),
@@ -96,10 +96,7 @@ impl ConnectionManager {
     }
 
     /// Create a new ConnectionManager with a custom reconnect policy.
-    pub fn with_reconnect_policy(
-        connector: Box<dyn TransportConnector>,
-        policy: ReconnectPolicy,
-    ) -> Self {
+    pub fn with_reconnect_policy(connector: C, policy: ReconnectPolicy) -> Self {
         Self {
             connections: HashMap::new(),
             addresses: HashMap::new(),
@@ -242,29 +239,29 @@ mod tests {
     use super::*;
     use crate::protocol::{Frame, MsgType};
     use crate::transport::{TransportConnection, TransportError};
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     // ─── Mock Transport ────────────────────────────────────────────
 
     /// Records all frames sent through this connection.
     struct MockConnection {
-        sent: Arc<Mutex<Vec<Vec<u8>>>>,
-        closed: Arc<Mutex<bool>>,
+        sent: Rc<RefCell<Vec<Vec<u8>>>>,
+        closed: Rc<RefCell<bool>>,
     }
 
     impl MockConnection {
-        fn new(sent: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+        fn new(sent: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
             Self {
                 sent,
-                closed: Arc::new(Mutex::new(false)),
+                closed: Rc::new(RefCell::new(false)),
             }
         }
     }
 
-    #[async_trait::async_trait]
     impl TransportConnection for MockConnection {
         async fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
-            self.sent.lock().unwrap().push(frame.encode());
+            self.sent.borrow_mut().push(frame.encode());
             Ok(())
         }
 
@@ -273,86 +270,88 @@ mod tests {
         }
 
         async fn close(&mut self) -> Result<(), TransportError> {
-            *self.closed.lock().unwrap() = true;
+            *self.closed.borrow_mut() = true;
             Ok(())
         }
     }
 
     /// Controls whether connect succeeds or fails, and tracks sent data.
     struct MockConnector {
-        should_fail: Arc<Mutex<bool>>,
-        sent_data: Arc<Mutex<Vec<Vec<u8>>>>,
-        connect_count: Arc<Mutex<u32>>,
+        should_fail: RefCell<bool>,
+        sent_data: Rc<RefCell<Vec<Vec<u8>>>>,
+        connect_count: RefCell<u32>,
     }
 
     impl MockConnector {
         fn new() -> Self {
             Self {
-                should_fail: Arc::new(Mutex::new(false)),
-                sent_data: Arc::new(Mutex::new(Vec::new())),
-                connect_count: Arc::new(Mutex::new(0)),
+                should_fail: RefCell::new(false),
+                sent_data: Rc::new(RefCell::new(Vec::new())),
+                connect_count: RefCell::new(0),
             }
         }
 
         #[allow(dead_code)]
         fn set_should_fail(&self, fail: bool) {
-            *self.should_fail.lock().unwrap() = fail;
+            *self.should_fail.borrow_mut() = fail;
         }
 
         fn connect_count(&self) -> u32 {
-            *self.connect_count.lock().unwrap()
+            *self.connect_count.borrow()
         }
 
         fn sent_data(&self) -> Vec<Vec<u8>> {
-            self.sent_data.lock().unwrap().clone()
+            self.sent_data.borrow().clone()
         }
     }
 
-    #[async_trait::async_trait]
     impl TransportConnector for MockConnector {
+        type Connection = MockConnection;
+
         async fn connect(
             &self,
             _addr: SocketAddr,
-        ) -> Result<Box<dyn TransportConnection>, TransportError> {
-            *self.connect_count.lock().unwrap() += 1;
-            if *self.should_fail.lock().unwrap() {
+        ) -> Result<MockConnection, TransportError> {
+            *self.connect_count.borrow_mut() += 1;
+            if *self.should_fail.borrow() {
                 return Err(TransportError::Io(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
                     "mock connection refused",
                 )));
             }
-            Ok(Box::new(MockConnection::new(self.sent_data.clone())))
+            Ok(MockConnection::new(self.sent_data.clone()))
         }
     }
 
-    /// Helper to create a mock connector wrapped in Arc for shared access.
+    /// Helper to create a mock connector wrapped in Rc for shared access.
     struct MockSetup {
-        connector: Arc<MockConnector>,
+        connector: Rc<MockConnector>,
     }
 
     impl MockSetup {
         fn new() -> Self {
             Self {
-                connector: Arc::new(MockConnector::new()),
+                connector: Rc::new(MockConnector::new()),
             }
         }
 
-        fn manager(self) -> (ConnectionManager, Arc<MockConnector>) {
+        fn manager(self) -> (ConnectionManager<RcConnector>, Rc<MockConnector>) {
             let connector_ref = self.connector.clone();
-            let mgr = ConnectionManager::new(Box::new(ArcConnector(self.connector)));
+            let mgr = ConnectionManager::new(RcConnector(self.connector));
             (mgr, connector_ref)
         }
     }
 
-    /// Wrapper to allow Arc<MockConnector> to be used as Box<dyn TransportConnector>.
-    struct ArcConnector(Arc<MockConnector>);
+    /// Wrapper to allow Rc<MockConnector> to be used as a TransportConnector.
+    struct RcConnector(Rc<MockConnector>);
 
-    #[async_trait::async_trait]
-    impl TransportConnector for ArcConnector {
+    impl TransportConnector for RcConnector {
+        type Connection = MockConnection;
+
         async fn connect(
             &self,
             addr: SocketAddr,
-        ) -> Result<Box<dyn TransportConnection>, TransportError> {
+        ) -> Result<MockConnection, TransportError> {
             self.0.connect(addr).await
         }
     }
@@ -383,7 +382,7 @@ mod tests {
 
     // ─── Connection Lifecycle Tests ────────────────────────────────
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn connect_to_new_node() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -395,7 +394,7 @@ mod tests {
         assert_eq!(mock.connect_count(), 1);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn route_frame_to_connected_node() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -405,12 +404,11 @@ mod tests {
 
         let sent = mock.sent_data();
         assert_eq!(sent.len(), 1);
-        // Verify the sent data decodes to a valid frame
         let decoded = Frame::decode(&sent[0]).unwrap();
         assert_eq!(decoded.msg_type, MsgType::Heartbeat);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn route_to_unknown_node_returns_error() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();
@@ -423,7 +421,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn disconnect_node() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();
@@ -436,7 +434,7 @@ mod tests {
         assert_eq!(mgr.connection_count(), 0);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn reconnect_after_disconnect() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -445,7 +443,6 @@ mod tests {
         mgr.disconnect(1).await.unwrap();
         assert!(!mgr.is_connected(1));
 
-        // Reconnect to same node
         mgr.connect(1, test_addr(4001)).await.unwrap();
         assert!(mgr.is_connected(1));
         assert_eq!(mock.connect_count(), 2);
@@ -453,7 +450,7 @@ mod tests {
 
     // ─── Event Handling Tests ──────────────────────────────────────
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn on_node_discovered_connects() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -464,7 +461,7 @@ mod tests {
         assert_eq!(mock.connect_count(), 1);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn on_node_discovered_idempotent() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -474,10 +471,10 @@ mod tests {
         mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
 
         assert_eq!(mgr.connection_count(), 1);
-        assert_eq!(mock.connect_count(), 1); // Only connected once
+        assert_eq!(mock.connect_count(), 1);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn on_connection_lost_fires_node_down() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();
@@ -489,7 +486,7 @@ mod tests {
         assert!(events.contains(&ConnectionEvent::NodeDown(1)));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn on_connection_lost_triggers_reconnect() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();
@@ -502,51 +499,45 @@ mod tests {
 
     // ─── Reconnection Tests ───────────────────────────────────────
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn exponential_backoff_timing() {
         let policy = ReconnectPolicy {
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(30),
         };
 
-        assert_eq!(policy.backoff_delay(0), Duration::from_secs(1)); // 1 * 2^0 = 1
-        assert_eq!(policy.backoff_delay(1), Duration::from_secs(2)); // 1 * 2^1 = 2
-        assert_eq!(policy.backoff_delay(2), Duration::from_secs(4)); // 1 * 2^2 = 4
-        assert_eq!(policy.backoff_delay(3), Duration::from_secs(8)); // 1 * 2^3 = 8
-        assert_eq!(policy.backoff_delay(4), Duration::from_secs(16)); // 1 * 2^4 = 16
+        assert_eq!(policy.backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(policy.backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(policy.backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(policy.backoff_delay(3), Duration::from_secs(8));
+        assert_eq!(policy.backoff_delay(4), Duration::from_secs(16));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn max_backoff_capped() {
         let policy = ReconnectPolicy {
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(30),
         };
 
-        // 2^5 = 32 > 30, should be capped
         assert_eq!(policy.backoff_delay(5), Duration::from_secs(30));
-        // 2^10 = 1024 >> 30, should still be capped
         assert_eq!(policy.backoff_delay(10), Duration::from_secs(30));
-        // Very large attempt shouldn't panic
         assert_eq!(policy.backoff_delay(100), Duration::from_secs(30));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn reconnect_succeeds_restores_routing() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
 
-        // Connect, then simulate connection loss
         mgr.connect(1, test_addr(4001)).await.unwrap();
         mgr.on_connection_lost(1).await;
         assert!(!mgr.is_connected(1));
 
-        // Reconnect succeeds
         let result = mgr.attempt_reconnect(1).await;
         assert!(result.is_ok());
         assert!(mgr.is_connected(1));
 
-        // Routing works after reconnect
         mgr.route(1, &send_frame("hello")).await.unwrap();
         let sent = mock.sent_data();
         assert_eq!(sent.len(), 1);
@@ -554,12 +545,11 @@ mod tests {
 
     // ─── Multi-node Tests ─────────────────────────────────────────
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn full_mesh_three_nodes() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
 
-        // Connect to 3 nodes forming a "full mesh" from this node's perspective
         mgr.connect(1, test_addr(4001)).await.unwrap();
         mgr.connect(2, test_addr(4002)).await.unwrap();
         mgr.connect(3, test_addr(4003)).await.unwrap();
@@ -570,7 +560,6 @@ mod tests {
         assert!(mgr.is_connected(3));
         assert_eq!(mock.connect_count(), 3);
 
-        // Route to each node
         mgr.route(1, &heartbeat_frame()).await.unwrap();
         mgr.route(2, &heartbeat_frame()).await.unwrap();
         mgr.route(3, &heartbeat_frame()).await.unwrap();
@@ -578,7 +567,7 @@ mod tests {
         assert_eq!(mock.sent_data().len(), 3);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn concurrent_route_to_multiple_nodes() {
         let setup = MockSetup::new();
         let (mut mgr, mock) = setup.manager();
@@ -586,7 +575,6 @@ mod tests {
         mgr.connect(1, test_addr(4001)).await.unwrap();
         mgr.connect(2, test_addr(4002)).await.unwrap();
 
-        // Route different payloads to different nodes
         mgr.route(1, &send_frame("msg_to_1")).await.unwrap();
         mgr.route(2, &send_frame("msg_to_2")).await.unwrap();
         mgr.route(1, &send_frame("another_to_1")).await.unwrap();
@@ -594,7 +582,6 @@ mod tests {
         let sent = mock.sent_data();
         assert_eq!(sent.len(), 3);
 
-        // Verify all payloads were sent
         let payloads: Vec<String> = sent
             .iter()
             .map(|data| {
@@ -607,7 +594,7 @@ mod tests {
         assert!(payloads.contains(&"another_to_1".to_string()));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn connection_count() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();
@@ -631,7 +618,7 @@ mod tests {
         assert_eq!(mgr.connection_count(), 0);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn drain_connections_closes_all() {
         let setup = MockSetup::new();
         let (mut mgr, _mock) = setup.manager();

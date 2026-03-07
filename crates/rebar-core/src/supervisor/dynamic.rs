@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::rc::Rc;
 
-use tokio::sync::{mpsc, oneshot};
+use local_sync::mpsc::unbounded as local_mpsc;
+use local_sync::oneshot;
 
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
@@ -10,7 +10,8 @@ use super::common::{check_restart_limit, shutdown_child_task};
 use super::spec::{ChildSpec, RestartType, SupervisorError};
 use super::engine::{ChildFactory, ChildEntry};
 
-static DYN_CHILD_PID_COUNTER: AtomicU64 = AtomicU64::new(2_000_000);
+static DYN_CHILD_PID_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(2_000_000);
 
 /// Specification for a dynamic supervisor.
 pub struct DynamicSupervisorSpec {
@@ -55,7 +56,7 @@ struct DynChildState {
     factory: ChildFactory,
     pid: ProcessId,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join_handle: Option<tokio::task::JoinHandle<()>>,
+    join_handle: Option<monoio::task::JoinHandle<()>>,
 }
 
 enum DynSupervisorMsg {
@@ -85,7 +86,7 @@ pub struct DynChildInfo {
 #[derive(Clone)]
 pub struct DynamicSupervisorHandle {
     pid: ProcessId,
-    msg_tx: mpsc::UnboundedSender<DynSupervisorMsg>,
+    msg_tx: local_mpsc::Tx<DynSupervisorMsg>,
 }
 
 impl DynamicSupervisorHandle {
@@ -137,26 +138,24 @@ impl DynamicSupervisorHandle {
 }
 
 /// Start a dynamic supervisor as a process in the given runtime.
-pub async fn start_dynamic_supervisor(
-    runtime: Arc<Runtime>,
+pub fn start_dynamic_supervisor(
+    runtime: &Runtime,
     spec: DynamicSupervisorSpec,
 ) -> DynamicSupervisorHandle {
-    let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+    let (msg_tx, msg_rx) = local_mpsc::channel();
     let msg_tx_clone = msg_tx.clone();
 
-    let pid = runtime
-        .spawn(move |_ctx| async move {
-            dynamic_supervisor_loop(spec, msg_rx, msg_tx_clone).await;
-        })
-        .await;
+    let pid = runtime.spawn(move |_ctx| async move {
+        dynamic_supervisor_loop(spec, msg_rx, msg_tx_clone).await;
+    });
 
     DynamicSupervisorHandle { pid, msg_tx }
 }
 
 async fn dynamic_supervisor_loop(
     spec: DynamicSupervisorSpec,
-    mut msg_rx: mpsc::UnboundedReceiver<DynSupervisorMsg>,
-    msg_tx: mpsc::UnboundedSender<DynSupervisorMsg>,
+    mut msg_rx: local_mpsc::Rx<DynSupervisorMsg>,
+    msg_tx: local_mpsc::Tx<DynSupervisorMsg>,
 ) {
     let mut children: HashMap<ProcessId, DynChildState> = HashMap::new();
     let mut restart_times = std::collections::VecDeque::new();
@@ -255,17 +254,17 @@ async fn dynamic_supervisor_loop(
 
 fn spawn_dyn_child(
     factory: &ChildFactory,
-    msg_tx: &mpsc::UnboundedSender<DynSupervisorMsg>,
-) -> (ProcessId, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-    let local_id = DYN_CHILD_PID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = ProcessId::new(0, local_id);
+    msg_tx: &local_mpsc::Tx<DynSupervisorMsg>,
+) -> (ProcessId, oneshot::Sender<()>, monoio::task::JoinHandle<()>) {
+    let local_id = DYN_CHILD_PID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = ProcessId::new(0, 0, local_id);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let factory = Arc::clone(factory);
+    let factory = Rc::clone(factory);
     let msg_tx = msg_tx.clone();
 
-    let handle = tokio::spawn(async move {
+    let handle = monoio::spawn(async move {
         let child_future = factory();
-        tokio::select! {
+        monoio::select! {
             reason = child_future => {
                 let _ = msg_tx.send(DynSupervisorMsg::ChildExited { pid, reason });
             }
@@ -294,21 +293,18 @@ async fn shutdown_all_dyn_children(children: &mut HashMap<ProcessId, DynChildSta
 mod tests {
     use super::*;
     use crate::supervisor::spec::ShutdownStrategy;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::time::Duration;
 
-    fn make_runtime() -> Arc<Runtime> {
-        Arc::new(Runtime::new(1))
-    }
-
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn start_child_adds_child_dynamically() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         let entry = ChildEntry::new(ChildSpec::new("worker1"), || async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                monoio::time::sleep(Duration::from_secs(60)).await;
             }
         });
         let pid = handle.start_child(entry).await.unwrap();
@@ -320,14 +316,14 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn terminate_child_removes_by_pid() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         let entry = ChildEntry::new(ChildSpec::new("worker1"), || async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                monoio::time::sleep(Duration::from_secs(60)).await;
             }
         });
         let pid = handle.start_child(entry).await.unwrap();
@@ -341,37 +337,37 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn terminate_nonexistent_child_returns_error() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
-        let fake_pid = ProcessId::new(0, 999_999);
+        let fake_pid = ProcessId::new(0, 0, 999_999);
         let result = handle.terminate_child(fake_pid).await;
         assert!(result.is_err());
 
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn max_children_limit_enforced() {
-        let rt = make_runtime();
+        let rt = Runtime::new(1);
         let spec = DynamicSupervisorSpec::new().max_children(2);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let e1 = ChildEntry::new(ChildSpec::new("w1"), || async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                monoio::time::sleep(Duration::from_secs(60)).await;
             }
         });
         let e2 = ChildEntry::new(ChildSpec::new("w2"), || async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                monoio::time::sleep(Duration::from_secs(60)).await;
             }
         });
         let e3 = ChildEntry::new(ChildSpec::new("w3"), || async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                monoio::time::sleep(Duration::from_secs(60)).await;
             }
         });
 
@@ -384,63 +380,63 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn crashed_permanent_child_is_restarted() {
-        let rt = make_runtime();
-        let restart_count = Arc::new(AtomicU32::new(0));
-        let restart_count_clone = Arc::clone(&restart_count);
+        let rt = Runtime::new(1);
+        let restart_count = Rc::new(Cell::new(0u32));
+        let restart_count_clone = Rc::clone(&restart_count);
 
         let spec = DynamicSupervisorSpec::new()
             .max_restarts(5)
             .max_seconds(10);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let entry = ChildEntry::new(
             ChildSpec::new("crasher").restart(RestartType::Permanent),
             move || {
-                let count = Arc::clone(&restart_count_clone);
+                let count = Rc::clone(&restart_count_clone);
                 async move {
-                    count.fetch_add(1, AtomicOrdering::SeqCst);
+                    count.set(count.get() + 1);
                     ExitReason::Abnormal("crash".into())
                 }
             },
         );
         handle.start_child(entry).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        monoio::time::sleep(Duration::from_millis(200)).await;
 
-        let count = restart_count.load(AtomicOrdering::SeqCst);
+        let count = restart_count.get();
         assert!(count > 1, "expected restarts, got count={count}");
 
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn crashed_transient_child_restarts_on_abnormal() {
-        let rt = make_runtime();
-        let restart_count = Arc::new(AtomicU32::new(0));
-        let restart_count_clone = Arc::clone(&restart_count);
+        let rt = Runtime::new(1);
+        let restart_count = Rc::new(Cell::new(0u32));
+        let restart_count_clone = Rc::clone(&restart_count);
 
         let spec = DynamicSupervisorSpec::new()
             .max_restarts(5)
             .max_seconds(10);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let entry = ChildEntry::new(
             ChildSpec::new("transient_crasher").restart(RestartType::Transient),
             move || {
-                let count = Arc::clone(&restart_count_clone);
+                let count = Rc::clone(&restart_count_clone);
                 async move {
-                    count.fetch_add(1, AtomicOrdering::SeqCst);
+                    count.set(count.get() + 1);
                     ExitReason::Abnormal("crash".into())
                 }
             },
         );
         handle.start_child(entry).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        monoio::time::sleep(Duration::from_millis(200)).await;
 
-        let count = restart_count.load(AtomicOrdering::SeqCst);
+        let count = restart_count.get();
         assert!(
             count > 1,
             "transient child should restart on abnormal exit, got count={count}"
@@ -449,32 +445,32 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn crashed_transient_child_not_restarted_on_normal() {
-        let rt = make_runtime();
-        let start_count = Arc::new(AtomicU32::new(0));
-        let start_count_clone = Arc::clone(&start_count);
+        let rt = Runtime::new(1);
+        let start_count = Rc::new(Cell::new(0u32));
+        let start_count_clone = Rc::clone(&start_count);
 
         let spec = DynamicSupervisorSpec::new()
             .max_restarts(5)
             .max_seconds(10);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let entry = ChildEntry::new(
             ChildSpec::new("transient_normal").restart(RestartType::Transient),
             move || {
-                let count = Arc::clone(&start_count_clone);
+                let count = Rc::clone(&start_count_clone);
                 async move {
-                    count.fetch_add(1, AtomicOrdering::SeqCst);
+                    count.set(count.get() + 1);
                     ExitReason::Normal
                 }
             },
         );
         handle.start_child(entry).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        monoio::time::sleep(Duration::from_millis(200)).await;
 
-        let count = start_count.load(AtomicOrdering::SeqCst);
+        let count = start_count.get();
         assert_eq!(count, 1, "transient child should not restart on normal exit");
 
         let counts = handle.count_children().await.unwrap();
@@ -483,41 +479,41 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn crashed_temporary_child_never_restarted() {
-        let rt = make_runtime();
-        let start_count = Arc::new(AtomicU32::new(0));
-        let start_count_clone = Arc::clone(&start_count);
+        let rt = Runtime::new(1);
+        let start_count = Rc::new(Cell::new(0u32));
+        let start_count_clone = Rc::clone(&start_count);
 
         let spec = DynamicSupervisorSpec::new()
             .max_restarts(5)
             .max_seconds(10);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let entry = ChildEntry::new(
             ChildSpec::new("temporary").restart(RestartType::Temporary),
             move || {
-                let count = Arc::clone(&start_count_clone);
+                let count = Rc::clone(&start_count_clone);
                 async move {
-                    count.fetch_add(1, AtomicOrdering::SeqCst);
+                    count.set(count.get() + 1);
                     ExitReason::Abnormal("crash".into())
                 }
             },
         );
         handle.start_child(entry).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        monoio::time::sleep(Duration::from_millis(200)).await;
 
-        let count = start_count.load(AtomicOrdering::SeqCst);
+        let count = start_count.get();
         assert_eq!(count, 1, "temporary child should never restart");
 
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn count_children_returns_correct_count() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         let counts = handle.count_children().await.unwrap();
         assert_eq!(counts.active, 0);
@@ -525,7 +521,7 @@ mod tests {
         for i in 0..3 {
             let entry = ChildEntry::new(ChildSpec::new(format!("w{i}")), || async {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    monoio::time::sleep(Duration::from_secs(60)).await;
                 }
             });
             handle.start_child(entry).await.unwrap();
@@ -537,16 +533,16 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn which_children_returns_correct_info() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         let entry = ChildEntry::new(
             ChildSpec::new("my_worker").restart(RestartType::Transient),
             || async {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    monoio::time::sleep(Duration::from_secs(60)).await;
                 }
             },
         );
@@ -561,13 +557,13 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn restart_limit_causes_supervisor_shutdown() {
-        let rt = make_runtime();
+        let rt = Runtime::new(1);
         let spec = DynamicSupervisorSpec::new()
             .max_restarts(2)
             .max_seconds(10);
-        let handle = start_dynamic_supervisor(rt, spec).await;
+        let handle = start_dynamic_supervisor(&rt, spec);
 
         let entry = ChildEntry::new(
             ChildSpec::new("crasher").restart(RestartType::Permanent),
@@ -576,22 +572,22 @@ mod tests {
         handle.start_child(entry).await.unwrap();
 
         // Wait for restart limit to be exceeded and supervisor to shut down
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        monoio::time::sleep(Duration::from_millis(500)).await;
 
         // Supervisor should be gone
         let result = handle.count_children().await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn shutdown_stops_all_children() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         for i in 0..5 {
             let entry = ChildEntry::new(ChildSpec::new(format!("w{i}")), || async {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    monoio::time::sleep(Duration::from_secs(60)).await;
                 }
             });
             handle.start_child(entry).await.unwrap();
@@ -602,36 +598,36 @@ mod tests {
 
         handle.shutdown();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        monoio::time::sleep(Duration::from_millis(100)).await;
 
         let result = handle.count_children().await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn brutal_kill_terminates_child_immediately() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
-        let started = Arc::new(AtomicBool::new(false));
-        let started_clone = Arc::clone(&started);
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
+        let started = Rc::new(Cell::new(false));
+        let started_clone = Rc::clone(&started);
 
         let entry = ChildEntry::new(
             ChildSpec::new("brutal")
                 .restart(RestartType::Temporary)
                 .shutdown(ShutdownStrategy::BrutalKill),
             move || {
-                let s = Arc::clone(&started_clone);
+                let s = Rc::clone(&started_clone);
                 async move {
-                    s.store(true, AtomicOrdering::SeqCst);
+                    s.set(true);
                     loop {
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        monoio::time::sleep(Duration::from_secs(60)).await;
                     }
                 }
             },
         );
         let pid = handle.start_child(entry).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(started.load(AtomicOrdering::SeqCst));
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert!(started.get());
 
         let before = std::time::Instant::now();
         handle.terminate_child(pid).await.unwrap();
@@ -643,30 +639,30 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn timeout_shutdown_sends_signal_and_waits() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
-        let started = Arc::new(AtomicBool::new(false));
-        let started_clone = Arc::clone(&started);
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
+        let started = Rc::new(Cell::new(false));
+        let started_clone = Rc::clone(&started);
 
         let entry = ChildEntry::new(
             ChildSpec::new("timeout_child")
                 .restart(RestartType::Temporary)
                 .shutdown(ShutdownStrategy::Timeout(Duration::from_millis(200))),
             move || {
-                let s = Arc::clone(&started_clone);
+                let s = Rc::clone(&started_clone);
                 async move {
-                    s.store(true, AtomicOrdering::SeqCst);
+                    s.set(true);
                     loop {
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        monoio::time::sleep(Duration::from_secs(60)).await;
                     }
                 }
             },
         );
         let pid = handle.start_child(entry).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(started.load(AtomicOrdering::SeqCst));
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert!(started.get());
 
         let before = std::time::Instant::now();
         handle.terminate_child(pid).await.unwrap();
@@ -678,29 +674,23 @@ mod tests {
         handle.shutdown();
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn infinity_shutdown_awaits_child_completion() {
-        let rt = make_runtime();
-        let handle = start_dynamic_supervisor(rt, DynamicSupervisorSpec::new()).await;
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_clone = Arc::clone(&completed);
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
         let entry = ChildEntry::new(
             ChildSpec::new("infinity_child")
                 .restart(RestartType::Temporary)
                 .shutdown(ShutdownStrategy::Infinity),
-            move || {
-                let c = Arc::clone(&completed_clone);
-                async move {
-                    // Simulate work then exit when shutdown signal received
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    c.store(true, AtomicOrdering::SeqCst);
-                    ExitReason::Normal
-                }
+            || async {
+                // Simulate work then exit when shutdown signal received
+                monoio::time::sleep(Duration::from_secs(60)).await;
+                ExitReason::Normal
             },
         );
         let pid = handle.start_child(entry).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        monoio::time::sleep(Duration::from_millis(50)).await;
 
         handle.terminate_child(pid).await.unwrap();
 

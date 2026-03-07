@@ -8,22 +8,24 @@ use rebar_core::runtime::Runtime;
 // FFI types
 // ---------------------------------------------------------------------------
 
-/// C-compatible PID with two u64 fields.
+/// C-compatible PID with node, thread, and local fields.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RebarPid {
     pub node_id: u64,
+    pub thread_id: u16,
     pub local_id: u64,
 }
 
 impl RebarPid {
     fn to_process_id(self) -> ProcessId {
-        ProcessId::new(self.node_id, self.local_id)
+        ProcessId::new(self.node_id, self.thread_id, self.local_id)
     }
 
     fn from_process_id(pid: ProcessId) -> Self {
         Self {
             node_id: pid.node_id(),
+            thread_id: pid.thread_id(),
             local_id: pid.local_id(),
         }
     }
@@ -34,12 +36,36 @@ pub struct RebarMsg {
     data: Vec<u8>,
 }
 
-/// Opaque runtime wrapper holding both a tokio runtime and the rebar runtime,
-/// plus a simple local name registry.
+/// Commands sent from C FFI to the monoio scheduler thread.
+enum FfiCommand {
+    Spawn {
+        callback: extern "C" fn(RebarPid),
+        reply: crossbeam_channel::Sender<ProcessId>,
+    },
+    Send {
+        dest: ProcessId,
+        payload: rmpv::Value,
+        reply: crossbeam_channel::Sender<Result<(), rebar_core::process::SendError>>,
+    },
+    Shutdown,
+}
+
+/// Opaque runtime wrapper holding a monoio worker thread, a crossbeam command
+/// channel, and a simple local name registry.
 pub struct RebarRuntime {
-    tokio_rt: tokio::runtime::Runtime,
-    runtime: Runtime,
+    cmd_tx: crossbeam_channel::Sender<FfiCommand>,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+    node_id: u64,
     registry: Mutex<HashMap<String, ProcessId>>,
+}
+
+impl Drop for RebarRuntime {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(FfiCommand::Shutdown);
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,18 +142,57 @@ pub extern "C" fn rebar_msg_free(msg: *mut RebarMsg) {
 
 /// Create a new runtime for the given node ID.
 ///
-/// Returns a heap-allocated `RebarRuntime` pointer, or null if the tokio
-/// runtime fails to build (should not happen under normal conditions).
+/// Spawns a dedicated monoio thread that runs the rebar runtime.
+/// Returns a heap-allocated `RebarRuntime` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
-    let tokio_rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let runtime = Runtime::new(node_id);
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<FfiCommand>();
+
+    let thread_handle = std::thread::spawn(move || {
+        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+            .enable_timer()
+            .build()
+            .expect("failed to build monoio runtime");
+
+        rt.block_on(async move {
+            let runtime = Runtime::new(node_id);
+
+            loop {
+                // Process commands from the FFI layer
+                match cmd_rx.try_recv() {
+                    Ok(FfiCommand::Spawn { callback, reply }) => {
+                        let pid = runtime.spawn(move |ctx| async move {
+                            let pid = ctx.self_pid();
+                            let ffi_pid = RebarPid::from_process_id(pid);
+                            callback(ffi_pid);
+                        });
+                        let _ = reply.send(pid);
+                    }
+                    Ok(FfiCommand::Send { dest, payload, reply }) => {
+                        let result = runtime.send(dest, payload);
+                        let _ = reply.send(result);
+                    }
+                    Ok(FfiCommand::Shutdown) => {
+                        runtime.shutdown();
+                        break;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        // Yield to let monoio process other tasks
+                        monoio::time::sleep(std::time::Duration::from_micros(100)).await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        runtime.shutdown();
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
     Box::into_raw(Box::new(RebarRuntime {
-        tokio_rt,
-        runtime,
+        cmd_tx,
+        thread_handle: Some(thread_handle),
+        node_id,
         registry: Mutex::new(HashMap::new()),
     }))
 }
@@ -167,20 +232,20 @@ pub extern "C" fn rebar_spawn(
         None => return REBAR_ERR_NULL_PTR,
     };
 
-    let pid = rt.tokio_rt.block_on(async {
-        rt.runtime
-            .spawn(move |ctx| async move {
-                let pid = ctx.self_pid();
-                let ffi_pid = RebarPid::from_process_id(pid);
-                cb(ffi_pid);
-            })
-            .await
-    });
-
-    unsafe {
-        *pid_out = RebarPid::from_process_id(pid);
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    if rt.cmd_tx.send(FfiCommand::Spawn { callback: cb, reply: reply_tx }).is_err() {
+        return REBAR_ERR_SEND_FAILED;
     }
-    REBAR_OK
+
+    match reply_rx.recv() {
+        Ok(pid) => {
+            unsafe {
+                *pid_out = RebarPid::from_process_id(pid);
+            }
+            REBAR_OK
+        }
+        Err(_) => REBAR_ERR_SEND_FAILED,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,12 +268,14 @@ pub extern "C" fn rebar_send(rt: *mut RebarRuntime, dest: RebarPid, msg: *const 
     let dest_pid = dest.to_process_id();
     let payload = rmpv::Value::Binary(msg.data.clone());
 
-    let result = rt
-        .tokio_rt
-        .block_on(async { rt.runtime.send(dest_pid, payload).await });
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    if rt.cmd_tx.send(FfiCommand::Send { dest: dest_pid, payload, reply: reply_tx }).is_err() {
+        return REBAR_ERR_SEND_FAILED;
+    }
 
-    match result {
-        Ok(()) => REBAR_OK,
+    match reply_rx.recv() {
+        Ok(Ok(())) => REBAR_OK,
+        Ok(Err(_)) => REBAR_ERR_SEND_FAILED,
         Err(_) => REBAR_ERR_SEND_FAILED,
     }
 }
@@ -310,12 +377,14 @@ pub extern "C" fn rebar_send_named(
     let msg_ref = unsafe { &*msg };
     let payload = rmpv::Value::Binary(msg_ref.data.clone());
 
-    let result = rt_ref
-        .tokio_rt
-        .block_on(async { rt_ref.runtime.send(dest_pid, payload).await });
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    if rt_ref.cmd_tx.send(FfiCommand::Send { dest: dest_pid, payload, reply: reply_tx }).is_err() {
+        return REBAR_ERR_SEND_FAILED;
+    }
 
-    match result {
-        Ok(()) => REBAR_OK,
+    match reply_rx.recv() {
+        Ok(Ok(())) => REBAR_OK,
+        Ok(Err(_)) => REBAR_ERR_SEND_FAILED,
         Err(_) => REBAR_ERR_SEND_FAILED,
     }
 }
@@ -387,7 +456,6 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn msg_free_null_is_noop() {
-        // Must not crash.
         rebar_msg_free(std::ptr::null_mut());
     }
 
@@ -427,9 +495,8 @@ mod tests {
         assert!(!rt1.is_null());
         assert!(!rt2.is_null());
 
-        // Verify that the underlying runtimes have different node IDs.
-        let node1 = unsafe { &*rt1 }.runtime.node_id();
-        let node2 = unsafe { &*rt2 }.runtime.node_id();
+        let node1 = unsafe { &*rt1 }.node_id;
+        let node2 = unsafe { &*rt2 }.node_id;
         assert_eq!(node1, 1);
         assert_eq!(node2, 42);
 
@@ -444,6 +511,7 @@ mod tests {
     fn pid_components() {
         let pid = RebarPid {
             node_id: 7,
+            thread_id: 0,
             local_id: 42,
         };
         assert_eq!(pid.node_id, 7);
@@ -465,6 +533,7 @@ mod tests {
     fn pid_zero_values() {
         let pid = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         assert_eq!(pid.node_id, 0);
@@ -487,6 +556,7 @@ mod tests {
 
         let mut pid_out = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         let rc = rebar_spawn(rt, Some(noop_callback), &mut pid_out);
@@ -505,7 +575,6 @@ mod tests {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        // We use an atomic flag to verify the callback ran.
         static CALLBACK_RAN: AtomicBool = AtomicBool::new(false);
         CALLBACK_RAN.store(false, Ordering::SeqCst);
 
@@ -515,6 +584,7 @@ mod tests {
 
         let mut pid_out = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         let rc = rebar_spawn(rt, Some(callback), &mut pid_out);
@@ -525,12 +595,10 @@ mod tests {
         assert!(CALLBACK_RAN.load(Ordering::SeqCst));
 
         // Send a message to the spawned process. The process has likely
-        // already exited (it only runs the callback), so we accept either
-        // success or send-failed.
+        // already exited, so we accept either success or send-failed.
         let data = b"hi";
         let msg = rebar_msg_create(data.as_ptr(), data.len());
         let send_rc = rebar_send(rt, pid_out, msg);
-        // The process may have exited already; both outcomes are acceptable.
         assert!(send_rc == REBAR_OK || send_rc == REBAR_ERR_SEND_FAILED);
 
         rebar_msg_free(msg);
@@ -547,6 +615,7 @@ mod tests {
 
         let dest = RebarPid {
             node_id: 1,
+            thread_id: 0,
             local_id: 999999,
         };
         let data = b"nope";
@@ -569,6 +638,7 @@ mod tests {
         let name = b"my_service";
         let pid = RebarPid {
             node_id: 1,
+            thread_id: 0,
             local_id: 42,
         };
 
@@ -577,6 +647,7 @@ mod tests {
 
         let mut found = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found);
@@ -595,21 +666,16 @@ mod tests {
         let rt = rebar_runtime_new(1);
         assert!(!rt.is_null());
 
-        // Spawn a long-lived process to receive messages.
         extern "C" fn long_lived_callback(_pid: RebarPid) {}
 
         let mut pid_out = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         let rc = rebar_spawn(rt, Some(long_lived_callback), &mut pid_out);
         assert_eq!(rc, REBAR_OK);
 
-        // We need to spawn a process that actually stays alive to receive.
-        // The callback-based spawn exits quickly, so we use a different
-        // approach: register a PID and attempt the send. Since the process
-        // exits quickly, we accept send failure. The test validates the
-        // registry lookup path works end-to-end.
         let name = b"worker";
         let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
         assert_eq!(rc, REBAR_OK);
@@ -635,6 +701,7 @@ mod tests {
         let name = b"nonexistent";
         let mut pid_out = RebarPid {
             node_id: 0,
+            thread_id: 0,
             local_id: 0,
         };
         let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut pid_out);
@@ -651,21 +718,21 @@ mod tests {
         let registry: Mutex<HashMap<String, rebar_core::process::ProcessId>> =
             Mutex::new(HashMap::new());
 
-        // Poison the mutex by panicking while holding the lock
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = registry.lock().unwrap();
-            guard.insert("test".to_string(), rebar_core::process::ProcessId::new(0, 1));
+            guard.insert(
+                "test".to_string(),
+                rebar_core::process::ProcessId::new(0, 0, 1),
+            );
             panic!("intentional panic to poison mutex");
         }));
 
-        // Verify the mutex is poisoned
         assert!(registry.lock().is_err());
 
-        // Verify recovery works
         let guard = registry.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
             guard.get("test"),
-            Some(&rebar_core::process::ProcessId::new(0, 1))
+            Some(&rebar_core::process::ProcessId::new(0, 0, 1))
         );
     }
 }

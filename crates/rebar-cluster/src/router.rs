@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
-use tokio::sync::mpsc;
+use local_sync::mpsc::unbounded::Tx;
 
 use crate::protocol::{Frame, MsgType};
 use rebar_core::process::table::ProcessTable;
@@ -18,15 +18,15 @@ pub enum RouterCommand {
 /// the remote transport layer for cross-node delivery.
 pub struct DistributedRouter {
     node_id: u64,
-    table: Arc<ProcessTable>,
-    remote_tx: mpsc::Sender<RouterCommand>,
+    table: Rc<ProcessTable>,
+    remote_tx: Tx<RouterCommand>,
 }
 
 impl DistributedRouter {
     pub fn new(
         node_id: u64,
-        table: Arc<ProcessTable>,
-        remote_tx: mpsc::Sender<RouterCommand>,
+        table: Rc<ProcessTable>,
+        remote_tx: Tx<RouterCommand>,
     ) -> Self {
         Self {
             node_id,
@@ -46,7 +46,7 @@ impl MessageRouter for DistributedRouter {
             // Remote delivery: encode as frame and send to transport
             let frame = encode_send_frame(from, to, payload);
             self.remote_tx
-                .try_send(RouterCommand::Send {
+                .send(RouterCommand::Send {
                     node_id: to.node_id(),
                     frame,
                 })
@@ -124,8 +124,8 @@ pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), 
         return Err(SendError::MalformedFrame("missing required addressing fields: to_node and to_local"));
     }
 
-    let from = ProcessId::new(from_node, from_local);
-    let to = ProcessId::new(to_node, to_local);
+    let from = ProcessId::new(from_node, 0, from_local);
+    let to = ProcessId::new(to_node, 0, to_local);
     let msg = Message::new(from, frame.payload.clone());
     table.send(to, msg)
 }
@@ -138,15 +138,15 @@ mod tests {
 
     #[test]
     fn distributed_router_routes_local() {
-        let table = Arc::new(ProcessTable::new(1));
+        let table = Rc::new(ProcessTable::new(1, 0));
         let pid = table.allocate_pid();
         let (tx, mut rx) = Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
 
-        let (remote_tx, _remote_rx) = mpsc::channel(10);
-        let router = DistributedRouter::new(1, Arc::clone(&table), remote_tx);
+        let (remote_tx, _remote_rx) = local_sync::mpsc::unbounded::channel();
+        let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
-        let from = ProcessId::new(1, 0);
+        let from = ProcessId::new(1, 0, 0);
         router
             .route(from, pid, rmpv::Value::String("local-msg".into()))
             .unwrap();
@@ -155,14 +155,14 @@ mod tests {
         assert_eq!(msg.payload().as_str().unwrap(), "local-msg");
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn distributed_router_routes_remote() {
-        let table = Arc::new(ProcessTable::new(1));
-        let (remote_tx, mut remote_rx) = mpsc::channel(10);
-        let router = DistributedRouter::new(1, Arc::clone(&table), remote_tx);
+        let table = Rc::new(ProcessTable::new(1, 0));
+        let (remote_tx, mut remote_rx) = local_sync::mpsc::unbounded::channel();
+        let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
-        let from = ProcessId::new(1, 5);
-        let remote_pid = ProcessId::new(2, 10);
+        let from = ProcessId::new(1, 0, 5);
+        let remote_pid = ProcessId::new(2, 0, 10);
 
         router
             .route(from, remote_pid, rmpv::Value::String("remote-msg".into()))
@@ -180,13 +180,15 @@ mod tests {
 
     #[test]
     fn distributed_router_node_unreachable() {
-        let table = Arc::new(ProcessTable::new(1));
-        let (remote_tx, _remote_rx) = mpsc::channel(1); // capacity 1
-        let router = DistributedRouter::new(1, Arc::clone(&table), remote_tx);
+        let table = Rc::new(ProcessTable::new(1, 0));
+        let (remote_tx, remote_rx) = local_sync::mpsc::unbounded::channel();
+        let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
-        let from = ProcessId::new(1, 0);
-        let remote_pid = ProcessId::new(2, 1);
-        router.route(from, remote_pid, rmpv::Value::Nil).unwrap(); // fills channel
+        // Drop receiver so send fails
+        drop(remote_rx);
+
+        let from = ProcessId::new(1, 0, 0);
+        let remote_pid = ProcessId::new(2, 0, 1);
 
         let result = router.route(from, remote_pid, rmpv::Value::Nil);
         assert_eq!(result, Err(SendError::NodeUnreachable(2)));
@@ -194,13 +196,13 @@ mod tests {
 
     #[test]
     fn inbound_frame_delivers_to_local_process() {
-        let table = Arc::new(ProcessTable::new(2));
+        let table = Rc::new(ProcessTable::new(2, 0));
         let pid = table.allocate_pid();
         let (tx, mut rx) = Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
 
         let frame = encode_send_frame(
-            ProcessId::new(1, 5),
+            ProcessId::new(1, 0, 5),
             pid,
             rmpv::Value::String("from-remote".into()),
         );
@@ -215,8 +217,8 @@ mod tests {
 
     #[test]
     fn encode_send_frame_has_correct_fields() {
-        let from = ProcessId::new(1, 5);
-        let to = ProcessId::new(2, 10);
+        let from = ProcessId::new(1, 0, 5);
+        let to = ProcessId::new(2, 0, 10);
         let frame = encode_send_frame(from, to, rmpv::Value::Integer(42.into()));
 
         assert_eq!(frame.version, 1);
@@ -228,7 +230,7 @@ mod tests {
 
     #[test]
     fn malformed_header_type() {
-        let table = ProcessTable::new(1);
+        let table = ProcessTable::new(1, 0);
         let frame = Frame {
             version: 1,
             msg_type: MsgType::Send,
@@ -242,7 +244,7 @@ mod tests {
 
     #[test]
     fn malformed_field_type() {
-        let table = ProcessTable::new(1);
+        let table = ProcessTable::new(1, 0);
         let frame = Frame {
             version: 1,
             msg_type: MsgType::Send,
@@ -259,7 +261,7 @@ mod tests {
 
     #[test]
     fn missing_fields_returns_malformed_frame() {
-        let table = ProcessTable::new(1);
+        let table = ProcessTable::new(1, 0);
         let frame = Frame {
             version: 1,
             msg_type: MsgType::Send,
@@ -267,8 +269,6 @@ mod tests {
             header: rmpv::Value::Map(vec![]),
             payload: rmpv::Value::Nil,
         };
-        // Empty map is missing required addressing fields (to_node, to_local),
-        // so it should return MalformedFrame.
         let result = deliver_inbound_frame(&table, &frame);
         assert_eq!(
             result,

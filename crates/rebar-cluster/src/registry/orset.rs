@@ -215,7 +215,7 @@ mod tests {
     use super::*;
 
     fn pid(node: u64, local: u64) -> ProcessId {
-        ProcessId::new(node, local)
+        ProcessId::new(node, 0, local)
     }
 
     // ── Basic operations ──────────────────────────────────────────────

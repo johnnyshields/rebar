@@ -7,14 +7,12 @@ repository.workspace = true
 description = "Core actor primitives and supervision for the Rebar runtime"
 
 [dependencies]
-async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-dashmap = "6"
+monoio = { version = "0.2", features = ["sync", "utils"] }
+local-sync = "0.1"
+crossbeam-channel = "0.5"
 rmpv = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-tokio-test = "0.4"

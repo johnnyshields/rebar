@@ -13,4 +13,5 @@ crate-type = ["cdylib", "lib"]
 rebar = { path = "../rebar" }
 rebar-core = { path = "../rebar-core" }
 rmpv = "1"
-tokio = { version = "1", features = ["full"] }
+monoio = { version = "0.2", features = ["sync", "utils"] }
+crossbeam-channel = "0.5"

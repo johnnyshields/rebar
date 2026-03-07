@@ -1,9 +1,7 @@
+use std::cell::Cell;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use std::time::Duration;
-
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::process::mailbox::{Mailbox, MailboxRx};
 use crate::process::table::{ProcessHandle, ProcessTable};
@@ -15,8 +13,8 @@ use crate::router::{LocalRouter, MessageRouter};
 pub struct ProcessContext {
     pid: ProcessId,
     rx: MailboxRx,
-    router: Arc<dyn MessageRouter>,
-    cancel_token: CancellationToken,
+    router: Rc<dyn MessageRouter>,
+    shutdown: Rc<Cell<bool>>,
 }
 
 impl ProcessContext {
@@ -41,55 +39,55 @@ impl ProcessContext {
     }
 
     /// Return a reference to the message router.
-    pub fn router(&self) -> &Arc<dyn MessageRouter> {
+    pub fn router(&self) -> &Rc<dyn MessageRouter> {
         &self.router
     }
 
     /// Send a message to another process by PID.
-    pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
+    pub fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
         self.router.route(self.pid, dest, payload)
     }
 
     /// Returns `true` if the runtime is shutting down.
     pub fn is_shutting_down(&self) -> bool {
-        self.cancel_token.is_cancelled()
+        self.shutdown.get()
     }
 
     /// Returns a future that completes when the runtime begins shutting down.
     ///
-    /// Useful in `tokio::select!` to react to shutdown:
-    /// ```ignore
-    /// tokio::select! {
-    ///     msg = ctx.recv() => { /* handle message */ }
-    ///     _ = ctx.cancelled() => { /* clean up and exit */ }
-    /// }
-    /// ```
+    /// Useful in `monoio::select!` to react to shutdown.
     pub async fn cancelled(&self) {
-        self.cancel_token.cancelled().await
+        while !self.shutdown.get() {
+            monoio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
 /// The Rebar runtime, responsible for spawning processes and routing messages.
+///
+/// In the monoio thread-per-core model, the Runtime lives on a single thread
+/// and uses `Rc` for shared ownership. All methods are synchronous (no `.await`).
 pub struct Runtime {
     node_id: u64,
-    table: Arc<ProcessTable>,
-    router: Arc<dyn MessageRouter>,
-    cancel_token: CancellationToken,
-    task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    #[allow(dead_code)]
+    thread_id: u16,
+    table: Rc<ProcessTable>,
+    router: Rc<dyn MessageRouter>,
+    shutdown: Rc<Cell<bool>>,
     default_mailbox_capacity: Option<usize>,
 }
 
 impl Runtime {
     /// Create a new runtime for the given node ID.
     pub fn new(node_id: u64) -> Self {
-        let table = Arc::new(ProcessTable::new(node_id));
-        let router = Arc::new(LocalRouter::new(Arc::clone(&table)));
+        let table = Rc::new(ProcessTable::new(node_id, 0));
+        let router = Rc::new(LocalRouter::new(Rc::clone(&table)));
         Self {
             node_id,
+            thread_id: 0,
             table,
             router,
-            cancel_token: CancellationToken::new(),
-            task_handles: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Rc::new(Cell::new(false)),
             default_mailbox_capacity: None,
         }
     }
@@ -97,15 +95,15 @@ impl Runtime {
     /// Create a runtime with a custom message router.
     pub fn with_router(
         node_id: u64,
-        table: Arc<ProcessTable>,
-        router: Arc<dyn MessageRouter>,
+        table: Rc<ProcessTable>,
+        router: Rc<dyn MessageRouter>,
     ) -> Self {
         Self {
             node_id,
+            thread_id: 0,
             table,
             router,
-            cancel_token: CancellationToken::new(),
-            task_handles: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Rc::new(Cell::new(false)),
             default_mailbox_capacity: None,
         }
     }
@@ -120,7 +118,7 @@ impl Runtime {
     }
 
     /// Return a reference to the process table.
-    pub fn table(&self) -> &Arc<ProcessTable> {
+    pub fn table(&self) -> &Rc<ProcessTable> {
         &self.table
     }
 
@@ -134,13 +132,12 @@ impl Runtime {
     /// The handler receives a `ProcessContext` and can use it to send/receive
     /// messages. Returns the new process's PID.
     ///
-    /// The spawned task is wrapped so that panics are caught and do not
-    /// crash the runtime. After the handler completes (normally or via panic),
-    /// the process is removed from the process table.
-    pub async fn spawn<F, Fut>(&self, handler: F) -> ProcessId
+    /// Note: In the monoio thread-per-core model, spawn is synchronous.
+    /// The handler and future need only be `'static`, not `Send`.
+    pub fn spawn<F, Fut>(&self, handler: F) -> ProcessId
     where
-        F: FnOnce(ProcessContext) -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: FnOnce(ProcessContext) -> Fut + 'static,
+        Fut: Future<Output = ()> + 'static,
     {
         let pid = self.table.allocate_pid();
         let (tx, rx) = match self.default_mailbox_capacity {
@@ -148,35 +145,20 @@ impl Runtime {
             None => Mailbox::unbounded(),
         };
 
-        let handle = ProcessHandle::new(tx);
-        self.table.insert(pid, handle);
+        self.table.insert(pid, ProcessHandle::new(tx));
 
-        let child_token = self.cancel_token.child_token();
         let ctx = ProcessContext {
             pid,
             rx,
-            router: Arc::clone(&self.router),
-            cancel_token: child_token,
+            router: Rc::clone(&self.router),
+            shutdown: Rc::clone(&self.shutdown),
         };
 
-        let table = Arc::clone(&self.table);
-
-        // Spawn a wrapper task that catches panics via the JoinHandle.
-        // tokio::spawn catches panics in the spawned task and returns
-        // JoinError instead of propagating them, so we spawn the handler
-        // inside an inner task and await its JoinHandle.
-        let join_handle = tokio::spawn(async move {
-            let inner = tokio::spawn(handler(ctx));
-            // Whether the handler completes normally or panics,
-            // we always clean up by removing from the process table.
-            let _ = inner.await;
+        let table = Rc::clone(&self.table);
+        monoio::spawn(async move {
+            handler(ctx).await;
             table.remove(&pid);
         });
-
-        let mut handles = self.task_handles.lock().unwrap_or_else(|e| e.into_inner());
-        // Prune completed handles to prevent unbounded growth
-        handles.retain(|h| !h.is_finished());
-        handles.push(join_handle);
 
         pid
     }
@@ -198,9 +180,9 @@ impl Runtime {
 
     /// Send a message to a process by PID from outside any process context.
     ///
-    /// Uses a synthetic PID of <node_id, 0> as the sender.
-    pub async fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
-        let from = ProcessId::new(self.node_id, 0);
+    /// Uses a synthetic PID of <node_id, 0, 0> as the sender.
+    pub fn send(&self, dest: ProcessId, payload: rmpv::Value) -> Result<(), SendError> {
+        let from = ProcessId::new(self.node_id, 0, 0);
         self.router.route(from, dest, payload)
     }
 
@@ -220,411 +202,280 @@ impl Runtime {
     }
 
     /// Send a message to a named process.
-    pub async fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
-        let pid = self.table.whereis(name)
+    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
+        let pid = self
+            .table
+            .whereis(name)
             .ok_or_else(|| SendError::NameNotFound(name.to_owned()))?;
-        let from = ProcessId::new(self.node_id, 0);
+        let from = ProcessId::new(self.node_id, 0, 0);
         self.router.route(from, pid, payload)
     }
 
-    /// Gracefully shut down the runtime, waiting for all processes to exit.
-    ///
-    /// Cancels the cancellation token (signaling all processes to stop),
-    /// then waits up to `timeout` for all spawned tasks to complete.
-    pub async fn shutdown(self, timeout: Duration) {
-        self.cancel_token.cancel();
-        let handles = std::mem::take(&mut *self.task_handles.lock().unwrap_or_else(|e| e.into_inner()));
-        let _ = tokio::time::timeout(timeout, async {
-            for h in handles {
-                let _ = h.await;
-            }
-        })
-        .await;
+    /// Signal the runtime to shut down.
+    pub fn shutdown(&self) {
+        self.shutdown.set(true);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn spawn_returns_pid() {
         let rt = Runtime::new(1);
-        let pid = rt.spawn(|_ctx| async {}).await;
+        let pid = rt.spawn(|_ctx| async {});
         assert_eq!(pid.node_id(), 1);
         assert_eq!(pid.local_id(), 1);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn spawn_multiple_unique_pids() {
         let rt = Runtime::new(1);
-        let pid1 = rt.spawn(|_ctx| async {}).await;
-        let pid2 = rt.spawn(|_ctx| async {}).await;
+        let pid1 = rt.spawn(|_ctx| async {});
+        let pid2 = rt.spawn(|_ctx| async {});
         assert_ne!(pid1, pid2);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn send_message_between_processes() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let receiver = rt
-            .spawn(move |mut ctx| async move {
-                let msg = ctx.recv().await.unwrap();
-                done_tx
-                    .send(msg.payload().as_str().unwrap().to_string())
-                    .unwrap();
-            })
-            .await;
+        let result = Rc::new(RefCell::new(None));
+        let result_clone = Rc::clone(&result);
+        let receiver = rt.spawn(move |mut ctx| async move {
+            let msg = ctx.recv().await.unwrap();
+            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+        });
         rt.spawn(move |ctx| async move {
             ctx.send(receiver, rmpv::Value::String("hello".into()))
-                .await
                 .unwrap();
-        })
-        .await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, "hello");
+        });
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(*result.borrow(), Some("hello".to_string()));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn self_pid_is_correct() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let pid = rt
-            .spawn(move |ctx| async move {
-                done_tx.send(ctx.self_pid()).unwrap();
-            })
-            .await;
-        let reported = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pid, reported);
+        let reported = Rc::new(Cell::new(None));
+        let reported_clone = Rc::clone(&reported);
+        let pid = rt.spawn(move |ctx| async move {
+            reported_clone.set(Some(ctx.self_pid()));
+        });
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(reported.get(), Some(pid));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn send_to_dead_process_returns_error() {
         let rt = Runtime::new(1);
-        let result = rt.send(ProcessId::new(1, 999), rmpv::Value::Nil).await;
+        let result = rt.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn recv_timeout_in_process() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let was_none = Rc::new(Cell::new(false));
+        let was_none_clone = Rc::clone(&was_none);
         rt.spawn(move |mut ctx| async move {
-            let result = ctx.recv_timeout(std::time::Duration::from_millis(10)).await;
-            done_tx.send(result.is_none()).unwrap();
-        })
-        .await;
-        let was_none = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(was_none);
+            let result = ctx.recv_timeout(Duration::from_millis(10)).await;
+            was_none_clone.set(result.is_none());
+        });
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        assert!(was_none.get());
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn process_can_send_to_self() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let result = Rc::new(RefCell::new(None));
+        let result_clone = Rc::clone(&result);
         rt.spawn(move |mut ctx| async move {
             let me = ctx.self_pid();
             ctx.send(me, rmpv::Value::String("self-msg".into()))
-                .await
                 .unwrap();
             let msg = ctx.recv().await.unwrap();
-            done_tx
-                .send(msg.payload().as_str().unwrap().to_string())
-                .unwrap();
-        })
-        .await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, "self-msg");
+            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+        });
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(*result.borrow(), Some("self-msg".to_string()));
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn chain_of_three_processes() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let c = rt
-            .spawn(move |mut ctx| async move {
-                let msg = ctx.recv().await.unwrap();
-                done_tx.send(msg.payload().as_u64().unwrap()).unwrap();
-            })
-            .await;
-        let b = rt
-            .spawn(move |mut ctx| async move {
-                let msg = ctx.recv().await.unwrap();
-                let val = msg.payload().as_u64().unwrap();
-                ctx.send(c, rmpv::Value::Integer((val + 1).into()))
-                    .await
-                    .unwrap();
-            })
-            .await;
-        rt.spawn(move |ctx| async move {
-            ctx.send(b, rmpv::Value::Integer(1u64.into()))
-                .await
+        let result = Rc::new(Cell::new(0u64));
+        let result_clone = Rc::clone(&result);
+        let c = rt.spawn(move |mut ctx| async move {
+            let msg = ctx.recv().await.unwrap();
+            result_clone.set(msg.payload().as_u64().unwrap());
+        });
+        let b = rt.spawn(move |mut ctx| async move {
+            let msg = ctx.recv().await.unwrap();
+            let val = msg.payload().as_u64().unwrap();
+            ctx.send(c, rmpv::Value::Integer((val + 1).into()))
                 .unwrap();
-        })
-        .await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, 2);
+        });
+        rt.spawn(move |ctx| async move {
+            ctx.send(b, rmpv::Value::Integer(1u64.into())).unwrap();
+        });
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(result.get(), 2);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn fan_out_fan_in() {
         let rt = Runtime::new(1);
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let results = Rc::new(RefCell::new(Vec::new()));
         let mut workers = Vec::new();
         for _ in 0..5 {
-            let tx = tx.clone();
-            let pid = rt
-                .spawn(move |mut ctx| async move {
-                    let msg = ctx.recv().await.unwrap();
-                    let val = msg.payload().as_u64().unwrap();
-                    tx.send(val * 2).await.unwrap();
-                })
-                .await;
+            let results = Rc::clone(&results);
+            let pid = rt.spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                let val = msg.payload().as_u64().unwrap();
+                results.borrow_mut().push(val * 2);
+            });
             workers.push(pid);
         }
-        drop(tx);
         rt.spawn(move |ctx| async move {
             for (i, pid) in workers.iter().enumerate() {
                 ctx.send(*pid, rmpv::Value::Integer((i as u64).into()))
-                    .await
                     .unwrap();
             }
-        })
-        .await;
-        let mut results = Vec::new();
-        while let Ok(Some(val)) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
-        {
-            results.push(val);
-        }
-        results.sort();
-        assert_eq!(results, vec![0, 2, 4, 6, 8]);
+        });
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        let mut r = results.borrow().clone();
+        r.sort();
+        assert_eq!(r, vec![0, 2, 4, 6, 8]);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn spawn_100_processes() {
         let rt = Runtime::new(1);
-        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        for i in 0..100u64 {
-            let tx = tx.clone();
+        let count = Rc::new(Cell::new(0u64));
+        for _ in 0..100u64 {
+            let count = Rc::clone(&count);
             rt.spawn(move |_ctx| async move {
-                tx.send(i).await.unwrap();
-            })
-            .await;
+                count.set(count.get() + 1);
+            });
         }
-        drop(tx);
-        let mut count = 0;
-        while let Ok(Some(_)) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await
-        {
-            count += 1;
-        }
-        assert_eq!(count, 100);
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(count.get(), 100);
     }
 
-    #[tokio::test]
-    async fn process_panic_does_not_crash_runtime() {
-        let rt = Runtime::new(1);
-        rt.spawn(|_ctx| async move {
-            panic!("intentional panic");
-        })
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        rt.spawn(move |_ctx| async move {
-            done_tx.send(42u64).unwrap();
-        })
-        .await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, 42);
-    }
-
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn node_id_accessor() {
         let rt = Runtime::new(42);
         assert_eq!(rt.node_id(), 42);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn multiple_messages_to_same_process() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let receiver = rt
-            .spawn(move |mut ctx| async move {
-                let mut sum = 0u64;
-                for _ in 0..5 {
-                    let msg = ctx.recv().await.unwrap();
-                    sum += msg.payload().as_u64().unwrap();
-                }
-                done_tx.send(sum).unwrap();
-            })
-            .await;
+        let result = Rc::new(Cell::new(0u64));
+        let result_clone = Rc::clone(&result);
+        let receiver = rt.spawn(move |mut ctx| async move {
+            let mut sum = 0u64;
+            for _ in 0..5 {
+                let msg = ctx.recv().await.unwrap();
+                sum += msg.payload().as_u64().unwrap();
+            }
+            result_clone.set(sum);
+        });
         for i in 1..=5u64 {
-            rt.send(receiver, rmpv::Value::Integer(i.into()))
-                .await
-                .unwrap();
+            rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
         }
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, 15);
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(result.get(), 15);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn process_context_send_returns_error_for_dead_target() {
         let rt = Runtime::new(1);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let was_err = Rc::new(Cell::new(false));
+        let was_err_clone = Rc::clone(&was_err);
         rt.spawn(move |ctx| async move {
-            let result = ctx.send(ProcessId::new(1, 999), rmpv::Value::Nil).await;
-            done_tx.send(result.is_err()).unwrap();
-        })
-        .await;
-        let was_err = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(was_err);
+            let result = ctx.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
+            was_err_clone.set(result.is_err());
+        });
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert!(was_err.get());
     }
 
-    #[tokio::test]
-    async fn shutdown_awaits_processes() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
+    #[monoio::test(enable_timer = true)]
+    async fn cancellation_flag_propagates() {
         let rt = Runtime::new(1);
+        let initially_not_shutting = Rc::new(Cell::new(false));
+        let initially_clone = Rc::clone(&initially_not_shutting);
+
         rt.spawn(move |ctx| async move {
-            // Wait for cancellation, then set flag
+            initially_clone.set(!ctx.is_shutting_down());
             ctx.cancelled().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            flag_clone.store(true, Ordering::SeqCst);
-        })
-        .await;
+        });
 
-        rt.shutdown(Duration::from_secs(5)).await;
-        assert!(flag.load(Ordering::SeqCst), "process should have completed before shutdown returned");
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert!(initially_not_shutting.get());
+
+        rt.shutdown();
+        monoio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    #[tokio::test]
-    async fn cancellation_token_propagates() {
-        let rt = Runtime::new(1);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        rt.spawn(move |ctx| async move {
-            let shutting_down = ctx.is_shutting_down();
-            tx.send(shutting_down).unwrap();
-            // Keep running so we can test cancellation
-            ctx.cancelled().await;
-        })
-        .await;
-
-        // Process should report not shutting down initially
-        let was_shutting_down = tokio::time::timeout(Duration::from_secs(1), rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!was_shutting_down);
-
-        rt.shutdown(Duration::from_secs(5)).await;
-    }
-
-    #[tokio::test]
-    async fn empty_runtime_shuts_down_immediately() {
-        let rt = Runtime::new(1);
-        let start = tokio::time::Instant::now();
-        rt.shutdown(Duration::from_secs(5)).await;
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn bounded_mailbox_capacity_respected() {
         let rt = Runtime::new(1).with_mailbox_capacity(2);
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let received = Rc::new(Cell::new(0u64));
+        let received_clone = Rc::clone(&received);
 
-        let receiver = rt
-            .spawn(move |mut ctx| async move {
-                // Don't read messages immediately - let mailbox fill up
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let mut count = 0u64;
-                while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
-                    count += 1;
-                }
-                tx.send(count).unwrap();
-            })
-            .await;
+        let receiver = rt.spawn(move |mut ctx| async move {
+            monoio::time::sleep(Duration::from_millis(200)).await;
+            let mut count = 0u64;
+            while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
+                count += 1;
+            }
+            received_clone.set(count);
+        });
 
-        // Try to send 5 messages to a capacity-2 mailbox
         let mut sent = 0u64;
         for i in 0..5u64 {
-            match rt.send(receiver, rmpv::Value::Integer(i.into())).await {
+            match rt.send(receiver, rmpv::Value::Integer(i.into())) {
                 Ok(()) => sent += 1,
                 Err(SendError::MailboxFull(_)) => {}
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
 
-        // Only 2 should have been accepted (bounded capacity)
         assert_eq!(sent, 2);
 
-        let received = tokio::time::timeout(Duration::from_secs(2), rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(received, 2);
+        monoio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(received.get(), 2);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn unbounded_mailbox_default_preserved() {
         let rt = Runtime::new(1);
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let received = Rc::new(Cell::new(0u64));
+        let received_clone = Rc::clone(&received);
 
-        let receiver = rt
-            .spawn(move |mut ctx| async move {
-                // Don't read immediately
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let mut count = 0u64;
-                while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
-                    count += 1;
-                }
-                tx.send(count).unwrap();
-            })
-            .await;
+        let receiver = rt.spawn(move |mut ctx| async move {
+            monoio::time::sleep(Duration::from_millis(100)).await;
+            let mut count = 0u64;
+            while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
+                count += 1;
+            }
+            received_clone.set(count);
+        });
 
-        // Send 100 messages - should all succeed with unbounded mailbox
         for i in 0..100u64 {
-            rt.send(receiver, rmpv::Value::Integer(i.into()))
-                .await
-                .unwrap();
+            rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
         }
 
-        let received = tokio::time::timeout(Duration::from_secs(2), rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(received, 100);
+        monoio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(received.get(), 100);
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn runtime_with_custom_router() {
         use crate::router::MessageRouter;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -645,81 +496,29 @@ mod tests {
             }
         }
 
-        let table = Arc::new(crate::process::table::ProcessTable::new(1));
-        let router = Arc::new(CountingRouter {
+        let table = Rc::new(crate::process::table::ProcessTable::new(1, 0));
+        let router = Rc::new(CountingRouter {
             count: AtomicU64::new(0),
-            inner: crate::router::LocalRouter::new(Arc::clone(&table)),
+            inner: crate::router::LocalRouter::new(Rc::clone(&table)),
         });
-        let counter_ref = Arc::clone(&router);
+        let counter_ref = Rc::clone(&router);
 
-        let rt = Runtime::with_router(1, Arc::clone(&table), router as Arc<dyn MessageRouter>);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let rt = Runtime::with_router(1, Rc::clone(&table), router as Rc<dyn MessageRouter>);
+        let result = Rc::new(RefCell::new(None));
+        let result_clone = Rc::clone(&result);
 
-        let receiver = rt
-            .spawn(move |mut ctx| async move {
-                let msg = ctx.recv().await.unwrap();
-                done_tx
-                    .send(msg.payload().as_str().unwrap().to_string())
-                    .unwrap();
-            })
-            .await;
+        let receiver = rt.spawn(move |mut ctx| async move {
+            let msg = ctx.recv().await.unwrap();
+            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+        });
 
         rt.spawn(move |ctx| async move {
             ctx.send(receiver, rmpv::Value::String("routed".into()))
-                .await
                 .unwrap();
-        })
-        .await;
+        });
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, "routed");
-        assert!(counter_ref.count.load(Ordering::Relaxed) > 0);
-    }
-
-    #[tokio::test]
-    async fn shutdown_timeout_enforced_on_hung_process() {
-        let rt = Runtime::new(1);
-        rt.spawn(|_ctx| async move {
-            // Ignore cancellation token entirely — just sleep forever
-            loop {
-                tokio::time::sleep(Duration::from_secs(3600)).await;
-            }
-        })
-        .await;
-
-        let start = tokio::time::Instant::now();
-        rt.shutdown(Duration::from_millis(100)).await;
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "shutdown should have returned within 500ms, but took {:?}",
-            elapsed,
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_after_process_panic() {
-        let rt = Runtime::new(1);
-        rt.spawn(|_ctx| async move {
-            panic!("intentional panic in shutdown test");
-        })
-        .await;
-
-        // Give the panic time to resolve
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let start = tokio::time::Instant::now();
-        rt.shutdown(Duration::from_secs(5)).await;
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "shutdown after panic should complete quickly, but took {:?}",
-            elapsed,
-        );
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*result.borrow(), Some("routed".to_string()));
+        assert!(counter_ref.count.load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 }

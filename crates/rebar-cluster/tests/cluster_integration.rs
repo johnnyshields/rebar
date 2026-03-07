@@ -4,39 +4,38 @@
 //! SWIM membership + gossip, TCP transport + wire protocol, OR-Set registry
 //! with delta replication, and the ConnectionManager with mock transport.
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::rc::Rc;
+
 
 use rebar_cluster::connection::{ConnectionEvent, ConnectionManager, TransportConnector};
 use rebar_cluster::protocol::{Frame, MsgType};
 use rebar_cluster::registry::{Registry, RegistryDelta};
 use rebar_cluster::router::{DistributedRouter, RouterCommand, deliver_inbound_frame};
 use rebar_cluster::swim::{GossipQueue, GossipUpdate, Member, MembershipList, NodeState};
-use rebar_cluster::transport::tcp::TcpTransport;
+use rebar_cluster::transport::tcp::{TcpConnection, TcpTransport};
 use rebar_cluster::transport::{TransportConnection, TransportError, TransportListener};
 use rebar_core::process::ProcessId;
 use rebar_core::process::table::ProcessTable;
 use rebar_core::runtime::Runtime;
-use tokio::sync::mpsc;
 
 // ─── Mock infrastructure for ConnectionManager tests ───────────────────────
 
 /// A mock transport connection that records sent frames.
 struct MockConnection {
-    sent: Arc<Mutex<Vec<Vec<u8>>>>,
+    sent: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 
 impl MockConnection {
-    fn new(sent: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+    fn new(sent: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
         Self { sent }
     }
 }
 
-#[async_trait::async_trait]
 impl TransportConnection for MockConnection {
     async fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
-        self.sent.lock().unwrap().push(frame.encode());
+        self.sent.borrow_mut().push(frame.encode());
         Ok(())
     }
 
@@ -51,50 +50,52 @@ impl TransportConnection for MockConnection {
 
 /// A mock transport connector that can be configured to succeed or fail.
 struct MockConnector {
-    should_fail: Arc<Mutex<bool>>,
-    sent_data: Arc<Mutex<Vec<Vec<u8>>>>,
+    should_fail: RefCell<bool>,
+    sent_data: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 
 impl MockConnector {
     fn new() -> Self {
         Self {
-            should_fail: Arc::new(Mutex::new(false)),
-            sent_data: Arc::new(Mutex::new(Vec::new())),
+            should_fail: RefCell::new(false),
+            sent_data: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
     #[allow(dead_code)]
     fn set_should_fail(&self, fail: bool) {
-        *self.should_fail.lock().unwrap() = fail;
+        *self.should_fail.borrow_mut() = fail;
     }
 }
 
-#[async_trait::async_trait]
 impl TransportConnector for MockConnector {
+    type Connection = MockConnection;
+
     async fn connect(
         &self,
         _addr: SocketAddr,
-    ) -> Result<Box<dyn TransportConnection>, TransportError> {
-        if *self.should_fail.lock().unwrap() {
+    ) -> Result<MockConnection, TransportError> {
+        if *self.should_fail.borrow() {
             return Err(TransportError::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "mock connection refused",
             )));
         }
-        Ok(Box::new(MockConnection::new(self.sent_data.clone())))
+        Ok(MockConnection::new(self.sent_data.clone()))
     }
 }
 
-/// Wraps Arc<MockConnector> so it can be used as Box<dyn TransportConnector>
+/// Wraps Rc<MockConnector> so it can be used as a TransportConnector
 /// while still allowing shared access for configuration and assertions.
-struct ArcConnector(Arc<MockConnector>);
+struct RcConnector(Rc<MockConnector>);
 
-#[async_trait::async_trait]
-impl TransportConnector for ArcConnector {
+impl TransportConnector for RcConnector {
+    type Connection = MockConnection;
+
     async fn connect(
         &self,
         addr: SocketAddr,
-    ) -> Result<Box<dyn TransportConnection>, TransportError> {
+    ) -> Result<MockConnection, TransportError> {
         self.0.connect(addr).await
     }
 }
@@ -104,7 +105,7 @@ fn test_addr(port: u16) -> SocketAddr {
 }
 
 fn pid(node: u64, local: u64) -> ProcessId {
-    ProcessId::new(node, local)
+    ProcessId::new(node, 0, local)
 }
 
 // ─── Test 1: two_nodes_discover_via_swim ───────────────────────────────────
@@ -114,7 +115,7 @@ fn pid(node: u64, local: u64) -> ProcessId {
 /// Node A gossips about itself so Node B can discover it.
 /// Node B gossips about itself so Node A can discover it.
 /// After the exchange, both membership lists see the other node as Alive.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn two_nodes_discover_via_swim() {
     // Node A (id=1) starts with itself in its membership list
     let mut list_a = MembershipList::new();
@@ -195,7 +196,7 @@ async fn two_nodes_discover_via_swim() {
 
 /// Start two TCP listeners on ephemeral ports, connect from node A to node B,
 /// send a frame, and verify node B receives it correctly.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn send_message_across_nodes() {
     let transport = TcpTransport::new();
 
@@ -207,7 +208,7 @@ async fn send_message_across_nodes() {
     let addr_b = listener_b.local_addr();
 
     // Server task: Node B accepts and receives one frame
-    let server = tokio::spawn(async move {
+    let server = monoio::spawn(async move {
         let mut conn = listener_b.accept().await.unwrap();
         conn.recv().await.unwrap()
     });
@@ -228,8 +229,7 @@ async fn send_message_across_nodes() {
     client.close().await.unwrap();
 
     // Verify the received frame
-    let timeout = tokio::time::timeout(Duration::from_secs(5), server);
-    let received = timeout.await.expect("server timed out").unwrap();
+    let received = server.await;
     assert_eq!(received.version, 1);
     assert_eq!(received.msg_type, MsgType::Send);
     assert_eq!(received.request_id, 42);
@@ -246,7 +246,7 @@ async fn send_message_across_nodes() {
 /// 2. Node B receives it and verifies the message type.
 /// 3. Node B sends a ProcessDown frame back to Node A.
 /// 4. Node A verifies the ProcessDown frame.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn remote_process_monitor_fires_on_exit() {
     let transport = TcpTransport::new();
 
@@ -257,7 +257,7 @@ async fn remote_process_monitor_fires_on_exit() {
     let addr_b = listener_b.local_addr();
 
     // Node B: accept connection, receive Monitor request, send ProcessDown back
-    let server = tokio::spawn(async move {
+    let server = monoio::spawn(async move {
         let mut conn = listener_b.accept().await.unwrap();
 
         // Receive the monitor request
@@ -303,11 +303,7 @@ async fn remote_process_monitor_fires_on_exit() {
     client.send(&monitor_frame).await.unwrap();
 
     // Receive the ProcessDown response
-    let timeout = tokio::time::timeout(Duration::from_secs(5), client.recv());
-    let down = timeout
-        .await
-        .expect("timed out waiting for ProcessDown")
-        .unwrap();
+    let down = client.recv().await.unwrap();
 
     assert_eq!(down.msg_type, MsgType::ProcessDown);
     assert_eq!(down.request_id, 100);
@@ -322,8 +318,7 @@ async fn remote_process_monitor_fires_on_exit() {
         .map(|(_, v)| v.as_str().unwrap().to_string());
     assert_eq!(reason, Some("normal".to_string()));
 
-    let timeout = tokio::time::timeout(Duration::from_secs(5), server);
-    timeout.await.expect("server timed out").unwrap();
+    server.await;
 }
 
 // ─── Test 4: registry_name_resolves_across_nodes ───────────────────────────
@@ -331,7 +326,7 @@ async fn remote_process_monitor_fires_on_exit() {
 /// Two registries on different nodes. A name registered on Registry A is
 /// replicated to Registry B via deltas. Registry B can then look up the name
 /// and resolve it to the correct PID.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn registry_name_resolves_across_nodes() {
     let mut reg_a = Registry::new();
     let mut reg_b = Registry::new();
@@ -378,10 +373,10 @@ async fn registry_name_resolves_across_nodes() {
 
 /// Use the ConnectionManager with a mock transport. Connect to a node, then
 /// trigger on_connection_lost. Verify the NodeDown event is emitted.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn node_down_fires_when_node_disconnects() {
-    let connector = Arc::new(MockConnector::new());
-    let mut mgr = ConnectionManager::new(Box::new(ArcConnector(connector.clone())));
+    let connector = Rc::new(MockConnector::new());
+    let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
 
     // Connect to node 5
     mgr.connect(5, test_addr(6000)).await.unwrap();
@@ -407,10 +402,10 @@ async fn node_down_fires_when_node_disconnects() {
 
 /// Connect to a node, simulate connection loss, then use attempt_reconnect
 /// to restore the connection. Verify the node is connected again afterward.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn reconnection_after_transient_failure() {
-    let connector = Arc::new(MockConnector::new());
-    let mut mgr = ConnectionManager::new(Box::new(ArcConnector(connector.clone())));
+    let connector = Rc::new(MockConnector::new());
+    let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
 
     // Connect to node 10
     mgr.connect(10, test_addr(7000)).await.unwrap();
@@ -438,16 +433,16 @@ async fn reconnection_after_transient_failure() {
 
 /// Simulate three nodes, each with a ConnectionManager, forming a full mesh.
 /// Each node connects to the other two. Verify each has connection_count() == 2.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn three_node_mesh_all_connected() {
     // Create three independent ConnectionManagers (one per node)
-    let connector_1 = Arc::new(MockConnector::new());
-    let connector_2 = Arc::new(MockConnector::new());
-    let connector_3 = Arc::new(MockConnector::new());
+    let connector_1 = Rc::new(MockConnector::new());
+    let connector_2 = Rc::new(MockConnector::new());
+    let connector_3 = Rc::new(MockConnector::new());
 
-    let mut mgr_1 = ConnectionManager::new(Box::new(ArcConnector(connector_1.clone())));
-    let mut mgr_2 = ConnectionManager::new(Box::new(ArcConnector(connector_2.clone())));
-    let mut mgr_3 = ConnectionManager::new(Box::new(ArcConnector(connector_3.clone())));
+    let mut mgr_1 = ConnectionManager::new(RcConnector(connector_1.clone()));
+    let mut mgr_2 = ConnectionManager::new(RcConnector(connector_2.clone()));
+    let mut mgr_3 = ConnectionManager::new(RcConnector(connector_3.clone()));
 
     // Node 1 connects to nodes 2 and 3
     mgr_1.connect(2, test_addr(8001)).await.unwrap();
@@ -495,33 +490,33 @@ async fn three_node_mesh_all_connected() {
 // ─── Test 8: end_to_end_cross_node_send_via_tcp ────────────────────────────
 
 /// End-to-end: two DistributedRuntimes send messages via TCP transport.
-#[tokio::test]
+#[monoio::test(enable_timer = true)]
 async fn end_to_end_cross_node_send_via_tcp() {
     struct TcpConnector;
 
-    #[async_trait::async_trait]
     impl TransportConnector for TcpConnector {
+        type Connection = TcpConnection;
+
         async fn connect(
             &self,
             addr: std::net::SocketAddr,
-        ) -> Result<Box<dyn TransportConnection>, TransportError> {
+        ) -> Result<TcpConnection, TransportError> {
             let transport = TcpTransport::new();
-            let conn = transport.connect(addr).await?;
-            Ok(Box::new(conn))
+            transport.connect(addr).await
         }
     }
 
     // --- Node 1 setup ---
-    let table1 = Arc::new(ProcessTable::new(1));
-    let (remote_tx1, mut remote_rx1) = mpsc::channel::<RouterCommand>(64);
-    let router1 = Arc::new(DistributedRouter::new(1, Arc::clone(&table1), remote_tx1));
-    let rt1 = Runtime::with_router(1, Arc::clone(&table1), router1);
+    let table1 = Rc::new(ProcessTable::new(1, 0));
+    let (remote_tx1, mut remote_rx1) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+    let router1 = Rc::new(DistributedRouter::new(1, Rc::clone(&table1), remote_tx1));
+    let rt1 = Runtime::with_router(1, Rc::clone(&table1), router1);
 
     // --- Node 2 setup ---
-    let table2 = Arc::new(ProcessTable::new(2));
-    let (remote_tx2, _remote_rx2) = mpsc::channel::<RouterCommand>(64);
-    let router2 = Arc::new(DistributedRouter::new(2, Arc::clone(&table2), remote_tx2));
-    let rt2 = Runtime::with_router(2, Arc::clone(&table2), router2);
+    let table2 = Rc::new(ProcessTable::new(2, 0));
+    let (remote_tx2, _remote_rx2) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+    let router2 = Rc::new(DistributedRouter::new(2, Rc::clone(&table2), remote_tx2));
+    let rt2 = Runtime::with_router(2, Rc::clone(&table2), router2);
 
     // Node 2: start TCP listener
     let transport2 = TcpTransport::new();
@@ -532,7 +527,7 @@ async fn end_to_end_cross_node_send_via_tcp() {
     let node2_addr = listener.local_addr();
 
     // Node 2: spawn a receiver process
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = local_sync::oneshot::channel();
     let receiver_pid = rt2
         .spawn(move |mut ctx| async move {
             let msg = ctx.recv().await.unwrap();
@@ -542,12 +537,11 @@ async fn end_to_end_cross_node_send_via_tcp() {
                     msg.payload().as_str().unwrap().to_string(),
                 ))
                 .unwrap();
-        })
-        .await;
+        });
 
     // Node 2: accept connection and deliver inbound frames
-    let table2_clone = Arc::clone(&table2);
-    let server = tokio::spawn(async move {
+    let table2_clone = Rc::clone(&table2);
+    let server = monoio::spawn(async move {
         let mut conn = listener.accept().await.unwrap();
         loop {
             match conn.recv().await {
@@ -561,12 +555,11 @@ async fn end_to_end_cross_node_send_via_tcp() {
     });
 
     // Node 1: connect to node 2
-    let mut mgr1 = ConnectionManager::new(Box::new(TcpConnector));
+    let mut mgr1 = ConnectionManager::new(TcpConnector);
     mgr1.connect(2, node2_addr).await.unwrap();
 
     // Node 1: send message to receiver_pid on node 2
     rt1.send(receiver_pid, rmpv::Value::String("cross-node-hello".into()))
-        .await
         .unwrap();
 
     // Node 1: process the outbound message (drain remote_rx1 → connection_manager)
@@ -576,13 +569,11 @@ async fn end_to_end_cross_node_send_via_tcp() {
     }
 
     // Node 2: verify message received
-    let (from_node, payload) = tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
-        .await
-        .unwrap()
-        .unwrap();
+    let timeout_result = monoio::time::timeout(std::time::Duration::from_secs(5), done_rx).await;
+    let (from_node, payload) = timeout_result.unwrap().unwrap();
     assert_eq!(from_node, 1);
     assert_eq!(payload, "cross-node-hello");
 
     // Ensure the background accept task completed cleanly
-    let _ = tokio::time::timeout(Duration::from_secs(1), server).await;
+    drop(server);
 }

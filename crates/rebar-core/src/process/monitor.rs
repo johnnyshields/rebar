@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn monitor_set_add_and_query() {
         let mut set = MonitorSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         let mref = set.add_monitor(pid);
         let monitors: Vec<_> = set.monitors_for(pid).collect();
         assert_eq!(monitors.len(), 1);
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn monitor_set_multiple_monitors_same_target() {
         let mut set = MonitorSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         let r1 = set.add_monitor(pid);
         let r2 = set.add_monitor(pid);
         assert_ne!(r1, r2);
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn monitor_set_remove() {
         let mut set = MonitorSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         let mref = set.add_monitor(pid);
         set.remove_monitor(mref);
         assert_eq!(set.monitors_for(pid).count(), 0);
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn monitor_set_remove_one_of_many() {
         let mut set = MonitorSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         let r1 = set.add_monitor(pid);
         let _r2 = set.add_monitor(pid);
         set.remove_monitor(r1);
@@ -172,10 +172,10 @@ mod tests {
     #[test]
     fn monitor_set_different_targets() {
         let mut set = MonitorSet::new();
-        set.add_monitor(ProcessId::new(1, 1));
-        set.add_monitor(ProcessId::new(1, 2));
-        assert_eq!(set.monitors_for(ProcessId::new(1, 1)).count(), 1);
-        assert_eq!(set.monitors_for(ProcessId::new(1, 2)).count(), 1);
+        set.add_monitor(ProcessId::new(1, 0, 1));
+        set.add_monitor(ProcessId::new(1, 0, 2));
+        assert_eq!(set.monitors_for(ProcessId::new(1, 0, 1)).count(), 1);
+        assert_eq!(set.monitors_for(ProcessId::new(1, 0, 2)).count(), 1);
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn link_set_add_and_contains() {
         let mut set = LinkSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         set.add_link(pid);
         assert!(set.is_linked(pid));
     }
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn link_set_remove() {
         let mut set = LinkSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         set.add_link(pid);
         set.remove_link(pid);
         assert!(!set.is_linked(pid));
@@ -204,8 +204,8 @@ mod tests {
     #[test]
     fn link_set_linked_pids_iter() {
         let mut set = LinkSet::new();
-        set.add_link(ProcessId::new(1, 1));
-        set.add_link(ProcessId::new(1, 2));
+        set.add_link(ProcessId::new(1, 0, 1));
+        set.add_link(ProcessId::new(1, 0, 2));
         let pids: Vec<_> = set.linked_pids().collect();
         assert_eq!(pids.len(), 2);
     }
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn link_set_duplicate_add_is_idempotent() {
         let mut set = LinkSet::new();
-        let pid = ProcessId::new(1, 1);
+        let pid = ProcessId::new(1, 0, 1);
         set.add_link(pid);
         set.add_link(pid);
         assert_eq!(set.linked_pids().count(), 1);

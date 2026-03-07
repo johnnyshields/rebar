@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 
-use async_trait::async_trait;
-
 use crate::protocol::Frame;
 
 #[derive(Debug, thiserror::Error)]
@@ -14,16 +12,14 @@ pub enum TransportError {
     Frame(#[from] crate::protocol::FrameError),
 }
 
-#[async_trait]
-pub trait TransportConnection: Send + Sync {
-    async fn send(&mut self, frame: &Frame) -> Result<(), TransportError>;
-    async fn recv(&mut self) -> Result<Frame, TransportError>;
-    async fn close(&mut self) -> Result<(), TransportError>;
+pub trait TransportConnection {
+    fn send(&mut self, frame: &Frame) -> impl Future<Output = Result<(), TransportError>>;
+    fn recv(&mut self) -> impl Future<Output = Result<Frame, TransportError>>;
+    fn close(&mut self) -> impl Future<Output = Result<(), TransportError>>;
 }
 
-#[async_trait]
-pub trait TransportListener: Send + Sync {
+pub trait TransportListener {
     type Connection: TransportConnection;
     fn local_addr(&self) -> SocketAddr;
-    async fn accept(&self) -> Result<Self::Connection, TransportError>;
+    fn accept(&self) -> impl Future<Output = Result<Self::Connection, TransportError>>;
 }

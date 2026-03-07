@@ -1,10 +1,11 @@
 pub use rebar_core::router::{LocalRouter, MessageRouter};
 pub use rebar_core::*;
 
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::rc::Rc;
 
-use rebar_cluster::connection::manager::ConnectionManager;
+use local_sync::mpsc::unbounded as local_mpsc;
+
+use rebar_cluster::connection::{ConnectionManager, TransportConnector};
 use rebar_cluster::protocol::Frame;
 use rebar_cluster::router::{DistributedRouter, RouterCommand, deliver_inbound_frame};
 use rebar_core::process::SendError;
@@ -12,23 +13,25 @@ use rebar_core::process::table::ProcessTable;
 use rebar_core::runtime::Runtime;
 
 /// A fully wired distributed runtime bridging rebar-core and rebar-cluster.
-pub struct DistributedRuntime {
+///
+/// This struct lives on a single monoio thread. All Rc fields are thread-local.
+pub struct DistributedRuntime<C: TransportConnector> {
     runtime: Runtime,
-    table: Arc<ProcessTable>,
-    connection_manager: ConnectionManager,
-    remote_rx: mpsc::Receiver<RouterCommand>,
+    table: Rc<ProcessTable>,
+    connection_manager: ConnectionManager<C>,
+    remote_rx: local_mpsc::Rx<RouterCommand>,
 }
 
-impl DistributedRuntime {
-    pub fn new(node_id: u64, connection_manager: ConnectionManager) -> Self {
-        let table = Arc::new(ProcessTable::new(node_id));
-        let (remote_tx, remote_rx) = mpsc::channel(1024);
-        let router = Arc::new(DistributedRouter::new(
+impl<C: TransportConnector> DistributedRuntime<C> {
+    pub fn new(node_id: u64, connection_manager: ConnectionManager<C>) -> Self {
+        let table = Rc::new(ProcessTable::new(node_id, 0));
+        let (remote_tx, remote_rx) = local_mpsc::channel();
+        let router = Rc::new(DistributedRouter::new(
             node_id,
-            Arc::clone(&table),
+            Rc::clone(&table),
             remote_tx,
         ));
-        let runtime = Runtime::with_router(node_id, Arc::clone(&table), router);
+        let runtime = Runtime::with_router(node_id, Rc::clone(&table), router);
 
         Self {
             runtime,
@@ -42,11 +45,11 @@ impl DistributedRuntime {
         &self.runtime
     }
 
-    pub fn table(&self) -> &Arc<ProcessTable> {
+    pub fn table(&self) -> &Rc<ProcessTable> {
         &self.table
     }
 
-    pub fn connection_manager_mut(&mut self) -> &mut ConnectionManager {
+    pub fn connection_manager_mut(&mut self) -> &mut ConnectionManager<C> {
         &mut self.connection_manager
     }
 
@@ -71,7 +74,6 @@ impl DistributedRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rebar_cluster::connection::manager::TransportConnector;
     use rebar_cluster::protocol::MsgType;
     use rebar_cluster::transport::{TransportConnection, TransportError};
     use rebar_core::process::mailbox::Mailbox;
@@ -80,42 +82,43 @@ mod tests {
 
     struct MockConnector;
 
-    #[async_trait::async_trait]
     impl TransportConnector for MockConnector {
-        async fn connect(
+        type Connection = MockConn;
+        fn connect(
             &self,
             _addr: std::net::SocketAddr,
-        ) -> Result<Box<dyn TransportConnection>, TransportError> {
-            Ok(Box::new(MockConn {
-                sent: Arc::new(Mutex::new(Vec::new())),
-            }))
+        ) -> impl Future<Output = Result<MockConn, TransportError>> {
+            async {
+                Ok(MockConn {
+                    sent: std::sync::Arc::new(Mutex::new(Vec::new())),
+                })
+            }
         }
     }
 
     struct MockConn {
-        sent: Arc<Mutex<Vec<Vec<u8>>>>,
+        sent: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
-    #[async_trait::async_trait]
     impl TransportConnection for MockConn {
-        async fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
+        fn send(&mut self, frame: &Frame) -> impl Future<Output = Result<(), TransportError>> {
             self.sent.lock().unwrap().push(frame.encode());
-            Ok(())
+            async { Ok(()) }
         }
-        async fn recv(&mut self) -> Result<Frame, TransportError> {
-            Err(TransportError::ConnectionClosed)
+        fn recv(&mut self) -> impl Future<Output = Result<Frame, TransportError>> {
+            async { Err(TransportError::ConnectionClosed) }
         }
-        async fn close(&mut self) -> Result<(), TransportError> {
-            Ok(())
+        fn close(&mut self) -> impl Future<Output = Result<(), TransportError>> {
+            async { Ok(()) }
         }
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn distributed_runtime_local_send() {
-        let mgr = ConnectionManager::new(Box::new(MockConnector));
+        let mgr = ConnectionManager::new(MockConnector);
         let drt = DistributedRuntime::new(1, mgr);
 
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = local_sync::oneshot::channel();
 
         let receiver = drt
             .runtime()
@@ -123,28 +126,28 @@ mod tests {
                 let msg = ctx.recv().await.unwrap();
                 done_tx
                     .send(msg.payload().as_str().unwrap().to_string())
-                    .unwrap();
-            })
-            .await;
+                    .ok();
+            });
 
         drt.runtime()
             .spawn(move |ctx| async move {
                 ctx.send(receiver, rmpv::Value::String("local".into()))
-                    .await
                     .unwrap();
-            })
-            .await;
+            });
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-            .await
-            .unwrap()
-            .unwrap();
+        let result = monoio::time::timeout(
+            std::time::Duration::from_secs(1),
+            done_rx,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(result, "local");
     }
 
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn distributed_runtime_inbound_delivery() {
-        let mgr = ConnectionManager::new(Box::new(MockConnector));
+        let mgr = ConnectionManager::new(MockConnector);
         let drt = DistributedRuntime::new(2, mgr);
 
         let pid = drt.table().allocate_pid();

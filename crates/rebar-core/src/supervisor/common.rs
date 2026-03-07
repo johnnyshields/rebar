@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use tokio::sync::oneshot;
+use local_sync::oneshot;
 
 use super::spec::ShutdownStrategy;
 
@@ -37,16 +37,16 @@ pub(crate) fn check_restart_limit(
 pub(crate) async fn shutdown_child_task(
     strategy: &ShutdownStrategy,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join_handle: Option<tokio::task::JoinHandle<()>>,
+    join_handle: Option<monoio::task::JoinHandle<()>>,
 ) {
     match (strategy, shutdown_tx, join_handle) {
         (ShutdownStrategy::BrutalKill, _tx, Some(handle)) => {
-            handle.abort();
-            let _ = handle.await;
+            // monoio JoinHandle doesn't have abort() - dropping cancels the task
+            drop(handle);
         }
         (ShutdownStrategy::Timeout(duration), Some(tx), Some(handle)) => {
             let _ = tx.send(());
-            if tokio::time::timeout(*duration, handle).await.is_err() {
+            if monoio::time::timeout(*duration, handle).await.is_err() {
                 // Timed out waiting for graceful shutdown
             }
         }

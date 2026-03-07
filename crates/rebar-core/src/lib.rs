@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod gen_server;
 pub mod process;
 pub mod router;

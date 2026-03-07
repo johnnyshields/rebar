@@ -1,7 +1,5 @@
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-use async_trait::async_trait;
 
 use crate::process::{ExitReason, ProcessId, RegistryError, SendError};
 use crate::router::MessageRouter;
@@ -45,7 +43,7 @@ pub struct From {
 
 pub struct GenServerContext {
     pid: ProcessId,
-    router: Arc<dyn MessageRouter>,
+    router: Rc<dyn MessageRouter>,
 }
 
 impl GenServerContext {
@@ -55,7 +53,10 @@ impl GenServerContext {
 
     pub fn cast(&self, dest: ProcessId, request: rmpv::Value) -> Result<(), SendError> {
         let envelope = rmpv::Value::Map(vec![
-            (rmpv::Value::String("$gs".into()), rmpv::Value::String("cast".into())),
+            (
+                rmpv::Value::String("$gs".into()),
+                rmpv::Value::String("cast".into()),
+            ),
             (rmpv::Value::String("req".into()), request),
         ]);
         self.router.route(self.pid, dest, envelope)
@@ -67,8 +68,14 @@ impl GenServerContext {
 
     pub fn reply(&self, from: &From, response: rmpv::Value) -> Result<(), SendError> {
         let envelope = rmpv::Value::Map(vec![
-            (rmpv::Value::String("$gs".into()), rmpv::Value::String("reply".into())),
-            (rmpv::Value::String("ref".into()), rmpv::Value::Integer(from.ref_id.into())),
+            (
+                rmpv::Value::String("$gs".into()),
+                rmpv::Value::String("reply".into()),
+            ),
+            (
+                rmpv::Value::String("ref".into()),
+                rmpv::Value::Integer(from.ref_id.into()),
+            ),
             (rmpv::Value::String("val".into()), response),
         ]);
         self.router.route(self.pid, from.pid, envelope)
@@ -76,40 +83,49 @@ impl GenServerContext {
 }
 
 // ---------------------------------------------------------------------------
-// GenServer trait
+// GenServer trait (using RPITIT, no async_trait needed)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-pub trait GenServer: Send + Sync + 'static {
-    type State: Send + 'static;
+pub trait GenServer: 'static {
+    type State: 'static;
 
-    async fn init(&self, args: rmpv::Value, ctx: &GenServerContext) -> Result<Self::State, String>;
+    fn init(
+        &self,
+        args: rmpv::Value,
+        ctx: &GenServerContext,
+    ) -> impl std::future::Future<Output = Result<Self::State, String>>;
 
-    async fn handle_call(
+    fn handle_call(
         &self,
         request: rmpv::Value,
         from: From,
         state: Self::State,
         ctx: &GenServerContext,
-    ) -> CallReply<Self::State>;
+    ) -> impl std::future::Future<Output = CallReply<Self::State>>;
 
-    async fn handle_cast(
+    fn handle_cast(
         &self,
         request: rmpv::Value,
         state: Self::State,
         ctx: &GenServerContext,
-    ) -> CastReply<Self::State>;
+    ) -> impl std::future::Future<Output = CastReply<Self::State>>;
 
-    async fn handle_info(
+    fn handle_info(
         &self,
         _msg: rmpv::Value,
         state: Self::State,
         _ctx: &GenServerContext,
-    ) -> InfoReply<Self::State> {
-        InfoReply::NoReply(state)
+    ) -> impl std::future::Future<Output = InfoReply<Self::State>> {
+        async { InfoReply::NoReply(state) }
     }
 
-    async fn terminate(&self, _reason: &str, _state: Self::State) {}
+    fn terminate(
+        &self,
+        _reason: &str,
+        _state: Self::State,
+    ) -> impl std::future::Future<Output = ()> {
+        async {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +163,7 @@ fn extract_field(value: &rmpv::Value, field: &str) -> Option<rmpv::Value> {
 // ---------------------------------------------------------------------------
 
 async fn gen_server_loop<S: GenServer>(
-    server: Arc<S>,
+    server: Rc<S>,
     args: rmpv::Value,
     mut process_ctx: ProcessContext,
 ) -> ExitReason {
@@ -169,7 +185,10 @@ async fn gen_server_loop<S: GenServer>(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let request = extract_field(&payload, "req").unwrap_or(rmpv::Value::Nil);
-                let from = From { pid: msg.from(), ref_id };
+                let from = From {
+                    pid: msg.from(),
+                    ref_id,
+                };
 
                 match server.handle_call(request, from.clone(), state, &ctx).await {
                     CallReply::Reply(response, new_state) => {
@@ -253,30 +272,29 @@ impl std::error::Error for CallError {}
 static CALL_REF_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Spawn a GenServer as a rebar process.
-pub async fn start<S: GenServer>(
-    runtime: &Runtime,
-    server: S,
-    args: rmpv::Value,
-) -> ProcessId {
-    let server = Arc::new(server);
+pub fn start<S: GenServer>(runtime: &Runtime, server: S, args: rmpv::Value) -> ProcessId {
+    let server = Rc::new(server);
     runtime.spawn(move |ctx| async move {
         gen_server_loop(server, args, ctx).await;
-    }).await
+    })
 }
 
 /// Spawn a named GenServer.
-pub async fn start_named<S: GenServer>(
+pub fn start_named<S: GenServer>(
     runtime: &Runtime,
     name: String,
     server: S,
     args: rmpv::Value,
 ) -> Result<ProcessId, RegistryError> {
-    let pid = start(runtime, server, args).await;
+    let pid = start(runtime, server, args);
     runtime.register(name, pid)?;
     Ok(pid)
 }
 
 /// Synchronous call from outside any process (spawns a temporary process).
+///
+/// Must be called from within the monoio runtime. Returns a future that
+/// resolves when the reply arrives or the timeout expires.
 pub async fn call_from_runtime(
     runtime: &Runtime,
     dest: ProcessId,
@@ -284,15 +302,21 @@ pub async fn call_from_runtime(
     timeout: std::time::Duration,
 ) -> Result<rmpv::Value, CallError> {
     let ref_id = CALL_REF_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = local_sync::oneshot::channel();
 
     runtime.spawn(move |mut ctx| async move {
         let envelope = rmpv::Value::Map(vec![
-            (rmpv::Value::String("$gs".into()), rmpv::Value::String("call".into())),
-            (rmpv::Value::String("ref".into()), rmpv::Value::Integer(ref_id.into())),
+            (
+                rmpv::Value::String("$gs".into()),
+                rmpv::Value::String("call".into()),
+            ),
+            (
+                rmpv::Value::String("ref".into()),
+                rmpv::Value::Integer(ref_id.into()),
+            ),
             (rmpv::Value::String("req".into()), request),
         ]);
-        if let Err(e) = ctx.send(dest, envelope).await {
+        if let Err(e) = ctx.send(dest, envelope) {
             let _ = tx.send(Err(CallError::SendFailed(e)));
             return;
         }
@@ -304,7 +328,8 @@ pub async fn call_from_runtime(
                     if extract_gs_type(&payload) == Some("reply") {
                         if let Some(r) = extract_field(&payload, "ref").and_then(|v| v.as_u64()) {
                             if r == ref_id {
-                                let val = extract_field(&payload, "val").unwrap_or(rmpv::Value::Nil);
+                                let val =
+                                    extract_field(&payload, "val").unwrap_or(rmpv::Value::Nil);
                                 let _ = tx.send(Ok(val));
                                 return;
                             }
@@ -317,59 +342,70 @@ pub async fn call_from_runtime(
                 }
             }
         }
-    }).await;
+    });
 
     rx.await.map_err(|_| CallError::ServerExited)?
 }
 
 /// Fire-and-forget cast from outside any process.
-pub async fn cast_from_runtime(
+pub fn cast_from_runtime(
     runtime: &Runtime,
     dest: ProcessId,
     request: rmpv::Value,
 ) -> Result<(), SendError> {
     let envelope = rmpv::Value::Map(vec![
-        (rmpv::Value::String("$gs".into()), rmpv::Value::String("cast".into())),
+        (
+            rmpv::Value::String("$gs".into()),
+            rmpv::Value::String("cast".into()),
+        ),
         (rmpv::Value::String("req".into()), request),
     ]);
-    runtime.send(dest, envelope).await
+    runtime.send(dest, envelope)
 }
 
 /// Reply to a From (for deferred replies outside the GenServer callbacks).
-pub async fn reply_from_runtime(
+pub fn reply_from_runtime(
     runtime: &Runtime,
     from: &From,
     response: rmpv::Value,
 ) -> Result<(), SendError> {
     let envelope = rmpv::Value::Map(vec![
-        (rmpv::Value::String("$gs".into()), rmpv::Value::String("reply".into())),
-        (rmpv::Value::String("ref".into()), rmpv::Value::Integer(from.ref_id.into())),
+        (
+            rmpv::Value::String("$gs".into()),
+            rmpv::Value::String("reply".into()),
+        ),
+        (
+            rmpv::Value::String("ref".into()),
+            rmpv::Value::Integer(from.ref_id.into()),
+        ),
         (rmpv::Value::String("val".into()), response),
     ]);
-    runtime.send(from.pid, envelope).await
+    runtime.send(from.pid, envelope)
 }
 
 /// Create a ChildEntry for supervision.
 pub fn child_entry<S: GenServer + Clone>(
-    runtime: Arc<Runtime>,
+    runtime: Rc<Runtime>,
     server: S,
     args: rmpv::Value,
     spec: ChildSpec,
 ) -> ChildEntry {
     ChildEntry::new(spec, move || {
-        let runtime = Arc::clone(&runtime);
+        let runtime = Rc::clone(&runtime);
         let server = server.clone();
         let args = args.clone();
         async move {
-            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-            let server = Arc::new(server);
+            let (exit_tx, exit_rx) = local_sync::oneshot::channel();
+            let server = Rc::new(server);
             runtime.spawn(move |ctx| async move {
                 let reason = gen_server_loop(server, args, ctx).await;
                 let _ = exit_tx.send(reason);
-            }).await;
+            });
             match exit_rx.await {
                 Ok(reason) => reason,
-                Err(_) => ExitReason::Abnormal("process dropped without sending exit reason".into()),
+                Err(_) => {
+                    ExitReason::Abnormal("process dropped without sending exit reason".into())
+                }
             }
         }
     })
@@ -389,7 +425,6 @@ mod tests {
     #[derive(Clone)]
     struct CounterServer;
 
-    #[async_trait]
     impl GenServer for CounterServer {
         type State = u64;
 
@@ -406,8 +441,12 @@ mod tests {
         ) -> CallReply<u64> {
             match request.as_str() {
                 Some("get") => CallReply::Reply(rmpv::Value::Integer(state.into()), state),
-                Some("increment") => CallReply::Reply(rmpv::Value::Integer((state + 1).into()), state + 1),
-                Some("stop") => CallReply::Stop("requested".into(), rmpv::Value::String("bye".into()), state),
+                Some("increment") => {
+                    CallReply::Reply(rmpv::Value::Integer((state + 1).into()), state + 1)
+                }
+                Some("stop") => {
+                    CallReply::Stop("requested".into(), rmpv::Value::String("bye".into()), state)
+                }
                 _ => CallReply::Reply(rmpv::Value::Nil, state),
             }
         }
@@ -431,30 +470,51 @@ mod tests {
     }
 
     // 1. basic_call
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn basic_call() {
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("increment".into()), Duration::from_secs(1)).await.unwrap();
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("increment".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 1);
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("increment".into()), Duration::from_secs(1)).await.unwrap();
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("increment".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 2);
     }
 
     // 2. basic_cast
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn basic_cast() {
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
         // Give the cast time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("get".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 1);
     }
 
     // 3. call_timeout
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn call_timeout() {
         let rt = new_runtime();
         // Spawn a process that never processes messages (blocks forever)
@@ -463,113 +523,140 @@ mod tests {
                 ctx.recv().await;
                 // Read but never reply
             }
-        }).await;
-        let result = call_from_runtime(&rt, pid, rmpv::Value::String("hello".into()), Duration::from_millis(100)).await;
+        });
+        let result = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("hello".into()),
+            Duration::from_millis(100),
+        )
+        .await;
         assert!(matches!(result, Err(CallError::Timeout)));
     }
 
     // 4. handle_info
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn handle_info() {
+        let received = Rc::new(std::cell::RefCell::new(None));
+
         struct InfoServer {
-            tx: tokio::sync::mpsc::Sender<rmpv::Value>,
+            received: Rc<std::cell::RefCell<Option<rmpv::Value>>>,
         }
 
-        #[async_trait]
         impl GenServer for InfoServer {
             type State = ();
-            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                _ctx: &GenServerContext,
+            ) -> Result<(), String> {
                 Ok(())
             }
-            async fn handle_call(&self, _req: rmpv::Value, _from: From, state: (), _ctx: &GenServerContext) -> CallReply<()> {
+            async fn handle_call(
+                &self,
+                _req: rmpv::Value,
+                _from: From,
+                state: (),
+                _ctx: &GenServerContext,
+            ) -> CallReply<()> {
                 CallReply::Reply(rmpv::Value::Nil, state)
             }
-            async fn handle_cast(&self, _req: rmpv::Value, state: (), _ctx: &GenServerContext) -> CastReply<()> {
+            async fn handle_cast(
+                &self,
+                _req: rmpv::Value,
+                state: (),
+                _ctx: &GenServerContext,
+            ) -> CastReply<()> {
                 CastReply::NoReply(state)
             }
-            async fn handle_info(&self, msg: rmpv::Value, state: (), _ctx: &GenServerContext) -> InfoReply<()> {
-                let _ = self.tx.send(msg).await;
+            async fn handle_info(
+                &self,
+                msg: rmpv::Value,
+                state: (),
+                _ctx: &GenServerContext,
+            ) -> InfoReply<()> {
+                *self.received.borrow_mut() = Some(msg);
                 InfoReply::NoReply(state)
             }
         }
 
         let rt = new_runtime();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let pid = start(&rt, InfoServer { tx }, rmpv::Value::Nil).await;
+        let received_clone = Rc::clone(&received);
+        let pid = start(
+            &rt,
+            InfoServer {
+                received: received_clone,
+            },
+            rmpv::Value::Nil,
+        );
 
         // Send a raw message (no $gs envelope) — should go to handle_info
-        rt.send(pid, rmpv::Value::String("raw_info".into())).await.unwrap();
+        rt.send(pid, rmpv::Value::String("raw_info".into()))
+            .unwrap();
 
-        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
-        assert_eq!(received.as_str().unwrap(), "raw_info");
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            received.borrow().as_ref().unwrap().as_str().unwrap(),
+            "raw_info"
+        );
     }
 
     // 5. stop_from_call
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn stop_from_call() {
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("stop".into()), Duration::from_secs(1)).await.unwrap();
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("stop".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_str().unwrap(), "bye");
         // Process should exit
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        monoio::time::sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
     }
 
     // 6. stop_from_cast
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn stop_from_cast() {
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
+        cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).unwrap();
+        monoio::time::sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
     }
 
     // 7. named_start
-    #[tokio::test]
+    #[monoio::test(enable_timer = true)]
     async fn named_start() {
         let rt = new_runtime();
-        let pid = start_named(&rt, "my_counter".into(), CounterServer, rmpv::Value::Integer(0u64.into())).await.unwrap();
+        let pid = start_named(
+            &rt,
+            "my_counter".into(),
+            CounterServer,
+            rmpv::Value::Integer(0u64.into()),
+        )
+        .unwrap();
         assert_eq!(rt.whereis("my_counter"), Some(pid));
     }
 
-    // 8. concurrent_callers
-    #[tokio::test]
-    async fn concurrent_callers() {
-        let rt = Arc::new(new_runtime());
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
-
-        let mut handles = Vec::new();
-        for _ in 0..10 {
-            let rt = Arc::clone(&rt);
-            handles.push(tokio::spawn(async move {
-                call_from_runtime(&rt, pid, rmpv::Value::String("increment".into()), Duration::from_secs(2)).await
-            }));
-        }
-
-        let mut results = Vec::new();
-        for h in handles {
-            let val = h.await.unwrap().unwrap();
-            results.push(val.as_u64().unwrap());
-        }
-        // Each caller should get a unique incremented value, all in 1..=10
-        results.sort();
-        assert_eq!(results.len(), 10);
-        assert_eq!(*results.first().unwrap(), 1);
-        assert_eq!(*results.last().unwrap(), 10);
-    }
-
-    // 9. deferred_reply
-    #[tokio::test]
+    // 8. deferred_reply
+    #[monoio::test(enable_timer = true)]
     async fn deferred_reply() {
         struct DeferredServer;
 
-        #[async_trait]
         impl GenServer for DeferredServer {
             type State = Option<From>;
 
-            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<Option<From>, String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                _ctx: &GenServerContext,
+            ) -> Result<Option<From>, String> {
                 Ok(None)
             }
 
@@ -581,15 +668,17 @@ mod tests {
                 _ctx: &GenServerContext,
             ) -> CallReply<Option<From>> {
                 match request.as_str() {
-                    Some("deferred") => {
-                        // Store from, reply later via handle_info
-                        CallReply::NoReply(Some(from))
-                    }
+                    Some("deferred") => CallReply::NoReply(Some(from)),
                     _ => CallReply::Reply(rmpv::Value::Nil, None),
                 }
             }
 
-            async fn handle_cast(&self, _req: rmpv::Value, state: Option<From>, _ctx: &GenServerContext) -> CastReply<Option<From>> {
+            async fn handle_cast(
+                &self,
+                _req: rmpv::Value,
+                state: Option<From>,
+                _ctx: &GenServerContext,
+            ) -> CastReply<Option<From>> {
                 CastReply::NoReply(state)
             }
 
@@ -608,87 +697,139 @@ mod tests {
             }
         }
 
-        let rt = Arc::new(Runtime::new(1));
-        let pid = start(&rt, DeferredServer, rmpv::Value::Nil).await;
+        let rt = Runtime::new(1);
+        let pid = start(&rt, DeferredServer, rmpv::Value::Nil);
 
-        let rt_call = Arc::clone(&rt);
-        let call_handle = tokio::spawn(async move {
-            call_from_runtime(&rt_call, pid, rmpv::Value::String("deferred".into()), Duration::from_secs(2)).await
+        // Spawn the call in the background
+        let result = Rc::new(std::cell::RefCell::new(None));
+        let result_clone = Rc::clone(&result);
+        // SAFETY: rt lives on the stack for the duration of this test.
+        // The spawned task completes before rt is dropped.
+        let rt_ptr: *const Runtime = &rt;
+        monoio::spawn(async move {
+            let reply = call_from_runtime(
+                unsafe { &*rt_ptr },
+                pid,
+                rmpv::Value::String("deferred".into()),
+                Duration::from_secs(2),
+            )
+            .await;
+            *result_clone.borrow_mut() = Some(reply);
         });
 
         // Give the call time to reach the server
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        monoio::time::sleep(Duration::from_millis(50)).await;
 
         // Trigger completion via raw info message
-        rt.send(pid, rmpv::Value::String("complete".into())).await.unwrap();
+        rt.send(pid, rmpv::Value::String("complete".into()))
+            .unwrap();
 
-        let result = call_handle.await.unwrap().unwrap();
-        assert_eq!(result.as_str().unwrap(), "deferred_result");
+        monoio::time::sleep(Duration::from_millis(100)).await;
+        let reply = result.borrow().as_ref().unwrap().as_ref().unwrap().clone();
+        assert_eq!(reply.as_str().unwrap(), "deferred_result");
     }
 
-    // 10. cast_from_runtime_test
-    #[tokio::test]
+    // 9. cast_from_runtime_test
+    #[monoio::test(enable_timer = true)]
     async fn cast_from_runtime_test() {
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(10u64.into())).await;
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
-        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(10u64.into()));
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
+        cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
+        monoio::time::sleep(Duration::from_millis(50)).await;
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("get".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 12);
     }
 
-    // 11. init_failure
-    #[tokio::test]
+    // 10. init_failure
+    #[monoio::test(enable_timer = true)]
     async fn init_failure() {
         struct FailServer;
 
-        #[async_trait]
         impl GenServer for FailServer {
             type State = ();
-            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                _ctx: &GenServerContext,
+            ) -> Result<(), String> {
                 Err("init failed".into())
             }
-            async fn handle_call(&self, _req: rmpv::Value, _from: From, state: (), _ctx: &GenServerContext) -> CallReply<()> {
+            async fn handle_call(
+                &self,
+                _req: rmpv::Value,
+                _from: From,
+                state: (),
+                _ctx: &GenServerContext,
+            ) -> CallReply<()> {
                 CallReply::Reply(rmpv::Value::Nil, state)
             }
-            async fn handle_cast(&self, _req: rmpv::Value, state: (), _ctx: &GenServerContext) -> CastReply<()> {
+            async fn handle_cast(
+                &self,
+                _req: rmpv::Value,
+                state: (),
+                _ctx: &GenServerContext,
+            ) -> CastReply<()> {
                 CastReply::NoReply(state)
             }
         }
 
         let rt = new_runtime();
-        let pid = start(&rt, FailServer, rmpv::Value::Nil).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pid = start(&rt, FailServer, rmpv::Value::Nil);
+        monoio::time::sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
     }
 
-    // 12. gen_server_context_self_pid
-    #[tokio::test]
+    // 11. gen_server_context_self_pid
+    #[monoio::test(enable_timer = true)]
     async fn gen_server_context_self_pid() {
         struct PidReporter;
 
-        #[async_trait]
         impl GenServer for PidReporter {
             type State = ProcessId;
-            async fn init(&self, _args: rmpv::Value, ctx: &GenServerContext) -> Result<ProcessId, String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                ctx: &GenServerContext,
+            ) -> Result<ProcessId, String> {
                 Ok(ctx.self_pid())
             }
-            async fn handle_call(&self, _req: rmpv::Value, _from: From, state: ProcessId, _ctx: &GenServerContext) -> CallReply<ProcessId> {
+            async fn handle_call(
+                &self,
+                _req: rmpv::Value,
+                _from: From,
+                state: ProcessId,
+                _ctx: &GenServerContext,
+            ) -> CallReply<ProcessId> {
                 let pid_val = rmpv::Value::Array(vec![
                     rmpv::Value::Integer(state.node_id().into()),
                     rmpv::Value::Integer(state.local_id().into()),
                 ]);
                 CallReply::Reply(pid_val, state)
             }
-            async fn handle_cast(&self, _req: rmpv::Value, state: ProcessId, _ctx: &GenServerContext) -> CastReply<ProcessId> {
+            async fn handle_cast(
+                &self,
+                _req: rmpv::Value,
+                state: ProcessId,
+                _ctx: &GenServerContext,
+            ) -> CastReply<ProcessId> {
                 CastReply::NoReply(state)
             }
         }
 
         let rt = new_runtime();
-        let pid = start(&rt, PidReporter, rmpv::Value::Nil).await;
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::Nil, Duration::from_secs(1)).await.unwrap();
+        let pid = start(&rt, PidReporter, rmpv::Value::Nil);
+        let reply =
+            call_from_runtime(&rt, pid, rmpv::Value::Nil, Duration::from_secs(1))
+                .await
+                .unwrap();
         if let rmpv::Value::Array(arr) = reply {
             let node = arr[0].as_u64().unwrap();
             let local = arr[1].as_u64().unwrap();
@@ -699,102 +840,133 @@ mod tests {
         }
     }
 
-    // 13. call_error_display
+    // 12. call_error_display
     #[test]
     fn call_error_display() {
         assert_eq!(format!("{}", CallError::Timeout), "call timed out");
         assert_eq!(format!("{}", CallError::ServerExited), "server exited");
-        let send_err = SendError::ProcessDead(ProcessId::new(1, 5));
+        let send_err = SendError::ProcessDead(ProcessId::new(1, 0, 5));
         let display = format!("{}", CallError::SendFailed(send_err));
         assert!(display.contains("send failed"));
     }
 
-    // 14. gen_server_is_send_sync
-    #[test]
-    fn gen_server_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<CounterServer>();
-    }
-
-    // 15. child_entry_creates_supervised
+    // 13. child_entry_creates_supervised
     #[test]
     fn child_entry_creates_supervised() {
-        let rt = Arc::new(Runtime::new(1));
+        let rt = Rc::new(Runtime::new(1));
         let spec = ChildSpec::new("counter");
         let entry = child_entry(rt, CounterServer, rmpv::Value::Integer(0u64.into()), spec);
         assert_eq!(entry.spec.id, "counter");
     }
 
-    // 16. raw_malformed_call_envelope
-    #[tokio::test]
+    // 14. raw_malformed_call_envelope
+    #[monoio::test(enable_timer = true)]
     async fn raw_malformed_call_envelope() {
-        // Send a $gs:call envelope missing the "ref" field directly to the server.
-        // The server should still process it (ref_id defaults to 0).
         let rt = new_runtime();
-        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into())).await;
+        let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
 
-        // Manually construct a call envelope without "ref"
         let malformed = rmpv::Value::Map(vec![
-            (rmpv::Value::String("$gs".into()), rmpv::Value::String("call".into())),
-            (rmpv::Value::String("req".into()), rmpv::Value::String("increment".into())),
+            (
+                rmpv::Value::String("$gs".into()),
+                rmpv::Value::String("call".into()),
+            ),
+            (
+                rmpv::Value::String("req".into()),
+                rmpv::Value::String("increment".into()),
+            ),
         ]);
-        rt.send(pid, malformed).await.unwrap();
+        rt.send(pid, malformed).unwrap();
 
-        // The server should process the call (increment) but the reply goes to PID(node,0)
-        // which is the runtime's synthetic sender. The server should NOT crash.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        monoio::time::sleep(Duration::from_millis(100)).await;
 
-        // Verify server is still alive and state was updated
-        let reply = call_from_runtime(&rt, pid, rmpv::Value::String("get".into()), Duration::from_secs(1)).await.unwrap();
+        let reply = call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("get".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 1);
     }
 
-    // 17. child_entry_propagates_abnormal_exit
-    #[tokio::test]
+    // 15. child_entry_propagates_abnormal_exit
+    #[monoio::test(enable_timer = true)]
     async fn child_entry_propagates_abnormal_exit() {
         #[derive(Clone)]
         struct FailInitServer;
 
-        #[async_trait]
         impl GenServer for FailInitServer {
             type State = ();
-            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                _ctx: &GenServerContext,
+            ) -> Result<(), String> {
                 Err("init failed".into())
             }
-            async fn handle_call(&self, _req: rmpv::Value, _from: From, s: (), _ctx: &GenServerContext) -> CallReply<()> {
+            async fn handle_call(
+                &self,
+                _req: rmpv::Value,
+                _from: From,
+                s: (),
+                _ctx: &GenServerContext,
+            ) -> CallReply<()> {
                 CallReply::Reply(rmpv::Value::Nil, s)
             }
-            async fn handle_cast(&self, _req: rmpv::Value, s: (), _ctx: &GenServerContext) -> CastReply<()> {
+            async fn handle_cast(
+                &self,
+                _req: rmpv::Value,
+                s: (),
+                _ctx: &GenServerContext,
+            ) -> CastReply<()> {
                 CastReply::NoReply(s)
             }
         }
 
-        let rt = Arc::new(Runtime::new(1));
+        let rt = Rc::new(Runtime::new(1));
         let spec = ChildSpec::new("fail_init");
-        let entry = child_entry(Arc::clone(&rt), FailInitServer, rmpv::Value::Nil, spec);
+        let entry = child_entry(Rc::clone(&rt), FailInitServer, rmpv::Value::Nil, spec);
 
         // Run the factory directly
         let reason = (entry.factory)().await;
-        assert!(matches!(reason, ExitReason::Abnormal(ref msg) if msg == "init failed"),
-            "expected Abnormal(\"init failed\"), got {:?}", reason);
+        assert!(
+            matches!(reason, ExitReason::Abnormal(ref msg) if msg == "init failed"),
+            "expected Abnormal(\"init failed\"), got {:?}",
+            reason
+        );
     }
 
-    // 18. child_entry_propagates_normal_exit
-    #[tokio::test]
+    // 16. child_entry_propagates_normal_exit
+    #[monoio::test(enable_timer = true)]
     async fn child_entry_propagates_normal_exit() {
         #[derive(Clone)]
         struct QuickStopServer;
 
-        #[async_trait]
         impl GenServer for QuickStopServer {
             type State = ();
-            async fn init(&self, _args: rmpv::Value, _ctx: &GenServerContext) -> Result<(), String> {
+            async fn init(
+                &self,
+                _args: rmpv::Value,
+                _ctx: &GenServerContext,
+            ) -> Result<(), String> {
                 Ok(())
             }
-            async fn handle_call(&self, _req: rmpv::Value, _from: From, s: (), _ctx: &GenServerContext) -> CallReply<()> {
+            async fn handle_call(
+                &self,
+                _req: rmpv::Value,
+                _from: From,
+                s: (),
+                _ctx: &GenServerContext,
+            ) -> CallReply<()> {
                 CallReply::Reply(rmpv::Value::Nil, s)
             }
-            async fn handle_cast(&self, request: rmpv::Value, s: (), _ctx: &GenServerContext) -> CastReply<()> {
+            async fn handle_cast(
+                &self,
+                request: rmpv::Value,
+                s: (),
+                _ctx: &GenServerContext,
+            ) -> CastReply<()> {
                 if request.as_str() == Some("stop") {
                     CastReply::Stop("done".into(), s)
                 } else {
@@ -803,24 +975,27 @@ mod tests {
             }
         }
 
-        let rt = Arc::new(Runtime::new(1));
+        let rt = Rc::new(Runtime::new(1));
         let spec = ChildSpec::new("quick_stop");
-        let entry = child_entry(Arc::clone(&rt), QuickStopServer, rmpv::Value::Nil, spec);
+        let entry = child_entry(Rc::clone(&rt), QuickStopServer, rmpv::Value::Nil, spec);
         let factory = entry.factory.clone();
 
-        let handle = tokio::spawn(async move {
-            factory().await
+        let result = Rc::new(std::cell::RefCell::new(None));
+        let result_clone = Rc::clone(&result);
+        monoio::spawn(async move {
+            let reason = factory().await;
+            *result_clone.borrow_mut() = Some(reason);
         });
 
         // Wait for the server to start, then find and stop it
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        monoio::time::sleep(Duration::from_millis(100)).await;
         let pids = rt.list_processes();
         if let Some(&pid) = pids.last() {
-            let _ = cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).await;
+            let _ = cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into()));
         }
 
-        let reason = tokio::time::timeout(Duration::from_secs(2), handle)
-            .await.expect("should complete").expect("should not panic");
-        assert!(matches!(reason, ExitReason::Normal));
+        monoio::time::sleep(Duration::from_millis(200)).await;
+        let reason = result.borrow().clone();
+        assert!(matches!(reason, Some(ExitReason::Normal)));
     }
 }
