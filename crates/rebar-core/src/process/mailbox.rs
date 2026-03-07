@@ -258,7 +258,7 @@ impl MailboxRx {
     /// Returns `Some(message)` if a message arrives within the given duration,
     /// or `None` if the timeout expires or the channel is closed.
     pub async fn recv_timeout(&mut self, duration: Duration) -> Option<Message> {
-        monoio::time::timeout(duration, self.recv())
+        crate::time::timeout(duration, self.recv())
             .await
             .ok()
             .flatten()
@@ -268,182 +268,217 @@ impl MailboxRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{ExecutorConfig, RebarExecutor};
     use crate::process::ProcessId;
 
-    #[monoio::test(enable_timer = true)]
-    async fn unbounded_send_receive() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
-        tx.send(msg).unwrap();
-        let received = rx.recv().await.unwrap();
-        assert_eq!(received.from(), ProcessId::new(1, 0, 1));
+    fn test_executor() -> RebarExecutor {
+        RebarExecutor::new(ExecutorConfig::default()).unwrap()
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn bounded_capacity_respected() {
-        let (tx, _rx) = Mailbox::bounded(1);
-        let msg1 = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
-        let msg2 = Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil);
-        tx.send(msg1).unwrap();
-        assert!(tx.try_send(msg2).is_err());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn recv_timeout_expires() {
-        let (_tx, mut rx) = Mailbox::unbounded();
-        let result = rx.recv_timeout(std::time::Duration::from_millis(10)).await;
-        assert!(result.is_none());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn recv_timeout_receives_in_time() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
-        tx.send(msg).unwrap();
-        let result = rx.recv_timeout(std::time::Duration::from_millis(100)).await;
-        assert!(result.is_some());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn multiple_messages_fifo() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        for i in 0..5u64 {
-            tx.send(Message::new(
-                ProcessId::new(1, 0, i),
-                rmpv::Value::Integer(i.into()),
-            ))
-            .unwrap();
-        }
-        for i in 0..5u64 {
-            let msg = rx.recv().await.unwrap();
-            assert_eq!(msg.from().local_id(), i);
-        }
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn dropped_sender_closes_receiver() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        drop(tx);
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn bounded_send_after_drain() {
-        let (tx, mut rx) = Mailbox::bounded(1);
-        let msg1 = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
-        tx.send(msg1).unwrap();
-        rx.recv().await.unwrap();
-        let msg2 = Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil);
-        assert!(tx.send(msg2).is_ok());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn send_to_closed_receiver_returns_error() {
-        let (tx, rx) = Mailbox::unbounded();
-        drop(rx);
-        let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
-        assert!(tx.send(msg).is_err());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn recv_timeout_zero_duration() {
-        let (_tx, mut rx) = Mailbox::unbounded();
-        let result = rx.recv_timeout(std::time::Duration::ZERO).await;
-        assert!(result.is_none());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn large_message_throughput() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        let count = 10_000;
-        for i in 0..count {
-            tx.send(Message::new(
-                ProcessId::new(1, 0, 1),
-                rmpv::Value::Integer(i.into()),
-            ))
-            .unwrap();
-        }
-        for _ in 0..count {
-            rx.recv().await.unwrap();
-        }
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn bounded_try_send_full_returns_mailbox_full() {
-        let (tx, _rx) = Mailbox::bounded(1);
-        tx.send(Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil))
-            .unwrap();
-        let result = tx.try_send(Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil));
-        match result {
-            Err(SendError::MailboxFull(_)) => {}
-            other => panic!("expected MailboxFull, got {:?}", other),
-        }
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn send_async_waits_for_space() {
-        let (tx, mut rx) = Mailbox::bounded(1);
-        let pid = ProcessId::new(0, 0, 1);
-
-        // Fill the mailbox
-        let msg1 = Message::new(pid, rmpv::Value::from(1));
-        tx.send(msg1).unwrap();
-
-        // Regular send should fail (mailbox full)
-        let msg2 = Message::new(pid, rmpv::Value::from(2));
-        assert!(matches!(tx.send(msg2), Err(SendError::MailboxFull(_))));
-
-        // send_async should wait, then succeed when space is made
-        let tx_clone = tx.clone();
-        let send_handle = monoio::spawn(async move {
-            let msg3 = Message::new(pid, rmpv::Value::from(3));
-            tx_clone.send_async(msg3).await.unwrap();
+    #[test]
+    fn unbounded_send_receive() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+            tx.send(msg).unwrap();
+            let received = rx.recv().await.unwrap();
+            assert_eq!(received.from(), ProcessId::new(1, 0, 1));
         });
-
-        // Yield to let the sender start waiting
-        monoio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Consume a message to make space
-        let received = rx.recv().await.unwrap();
-        assert_eq!(received.payload().as_u64(), Some(1));
-
-        // The send_async should now complete
-        send_handle.await;
-
-        // Verify the async-sent message is in the mailbox
-        let received = rx.recv().await.unwrap();
-        assert_eq!(received.payload().as_u64(), Some(3));
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn send_async_to_closed_bounded_returns_process_dead() {
-        let (tx, rx) = Mailbox::bounded(10);
-        drop(rx);
-        let pid = ProcessId::new(0, 0, 1);
-        let msg = Message::new(pid, rmpv::Value::from(1));
-        let result = tx.send_async(msg).await;
-        assert!(matches!(result, Err(SendError::ProcessDead(_))));
+    #[test]
+    fn bounded_capacity_respected() {
+        test_executor().block_on(async {
+            let (tx, _rx) = Mailbox::bounded(1);
+            let msg1 = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+            let msg2 = Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil);
+            tx.send(msg1).unwrap();
+            assert!(tx.try_send(msg2).is_err());
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn send_async_to_closed_unbounded_returns_process_dead() {
-        let (tx, rx) = Mailbox::unbounded();
-        drop(rx);
-        let pid = ProcessId::new(0, 0, 1);
-        let msg = Message::new(pid, rmpv::Value::from(1));
-        let result = tx.send_async(msg).await;
-        assert!(matches!(result, Err(SendError::ProcessDead(_))));
+    #[test]
+    fn recv_timeout_expires() {
+        test_executor().block_on(async {
+            let (_tx, mut rx) = Mailbox::unbounded();
+            let result = rx.recv_timeout(std::time::Duration::from_millis(10)).await;
+            assert!(result.is_none());
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn send_async_unbounded_works() {
-        let (tx, mut rx) = Mailbox::unbounded();
-        let pid = ProcessId::new(0, 0, 1);
+    #[test]
+    fn recv_timeout_receives_in_time() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+            tx.send(msg).unwrap();
+            let result = rx.recv_timeout(std::time::Duration::from_millis(100)).await;
+            assert!(result.is_some());
+        });
+    }
 
-        let msg = Message::new(pid, rmpv::Value::from(42));
-        tx.send_async(msg).await.unwrap();
+    #[test]
+    fn multiple_messages_fifo() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            for i in 0..5u64 {
+                tx.send(Message::new(
+                    ProcessId::new(1, 0, i),
+                    rmpv::Value::Integer(i.into()),
+                ))
+                .unwrap();
+            }
+            for i in 0..5u64 {
+                let msg = rx.recv().await.unwrap();
+                assert_eq!(msg.from().local_id(), i);
+            }
+        });
+    }
 
-        let received = rx.recv().await.unwrap();
-        assert_eq!(received.payload().as_u64(), Some(42));
+    #[test]
+    fn dropped_sender_closes_receiver() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            drop(tx);
+            assert!(rx.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn bounded_send_after_drain() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::bounded(1);
+            let msg1 = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+            tx.send(msg1).unwrap();
+            rx.recv().await.unwrap();
+            let msg2 = Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil);
+            assert!(tx.send(msg2).is_ok());
+        });
+    }
+
+    #[test]
+    fn send_to_closed_receiver_returns_error() {
+        test_executor().block_on(async {
+            let (tx, rx) = Mailbox::unbounded();
+            drop(rx);
+            let msg = Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+            assert!(tx.send(msg).is_err());
+        });
+    }
+
+    #[test]
+    fn recv_timeout_zero_duration() {
+        test_executor().block_on(async {
+            let (_tx, mut rx) = Mailbox::unbounded();
+            let result = rx.recv_timeout(std::time::Duration::ZERO).await;
+            assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn large_message_throughput() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            let count = 10_000;
+            for i in 0..count {
+                tx.send(Message::new(
+                    ProcessId::new(1, 0, 1),
+                    rmpv::Value::Integer(i.into()),
+                ))
+                .unwrap();
+            }
+            for _ in 0..count {
+                rx.recv().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn bounded_try_send_full_returns_mailbox_full() {
+        test_executor().block_on(async {
+            let (tx, _rx) = Mailbox::bounded(1);
+            tx.send(Message::new(ProcessId::new(1, 0, 1), rmpv::Value::Nil))
+                .unwrap();
+            let result = tx.try_send(Message::new(ProcessId::new(1, 0, 2), rmpv::Value::Nil));
+            match result {
+                Err(SendError::MailboxFull(_)) => {}
+                other => panic!("expected MailboxFull, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn send_async_waits_for_space() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::bounded(1);
+            let pid = ProcessId::new(0, 0, 1);
+
+            // Fill the mailbox
+            let msg1 = Message::new(pid, rmpv::Value::from(1));
+            tx.send(msg1).unwrap();
+
+            // Regular send should fail (mailbox full)
+            let msg2 = Message::new(pid, rmpv::Value::from(2));
+            assert!(matches!(tx.send(msg2), Err(SendError::MailboxFull(_))));
+
+            // send_async should wait, then succeed when space is made
+            let tx_clone = tx.clone();
+            let send_handle = crate::executor::spawn(async move {
+                let msg3 = Message::new(pid, rmpv::Value::from(3));
+                tx_clone.send_async(msg3).await.unwrap();
+            });
+
+            // Yield to let the sender start waiting
+            crate::time::sleep(std::time::Duration::from_millis(10)).await;
+
+            // Consume a message to make space
+            let received = rx.recv().await.unwrap();
+            assert_eq!(received.payload().as_u64(), Some(1));
+
+            // The send_async should now complete
+            send_handle.await;
+
+            // Verify the async-sent message is in the mailbox
+            let received = rx.recv().await.unwrap();
+            assert_eq!(received.payload().as_u64(), Some(3));
+        });
+    }
+
+    #[test]
+    fn send_async_to_closed_bounded_returns_process_dead() {
+        test_executor().block_on(async {
+            let (tx, rx) = Mailbox::bounded(10);
+            drop(rx);
+            let pid = ProcessId::new(0, 0, 1);
+            let msg = Message::new(pid, rmpv::Value::from(1));
+            let result = tx.send_async(msg).await;
+            assert!(matches!(result, Err(SendError::ProcessDead(_))));
+        });
+    }
+
+    #[test]
+    fn send_async_to_closed_unbounded_returns_process_dead() {
+        test_executor().block_on(async {
+            let (tx, rx) = Mailbox::unbounded();
+            drop(rx);
+            let pid = ProcessId::new(0, 0, 1);
+            let msg = Message::new(pid, rmpv::Value::from(1));
+            let result = tx.send_async(msg).await;
+            assert!(matches!(result, Err(SendError::ProcessDead(_))));
+        });
+    }
+
+    #[test]
+    fn send_async_unbounded_works() {
+        test_executor().block_on(async {
+            let (tx, mut rx) = Mailbox::unbounded();
+            let pid = ProcessId::new(0, 0, 1);
+
+            let msg = Message::new(pid, rmpv::Value::from(42));
+            tx.send_async(msg).await.unwrap();
+
+            let received = rx.recv().await.unwrap();
+            assert_eq!(received.payload().as_u64(), Some(42));
+        });
     }
 }

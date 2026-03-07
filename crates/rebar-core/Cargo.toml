@@ -7,7 +7,11 @@ repository.workspace = true
 description = "Core actor primitives and supervision for the Rebar runtime"
 
 [dependencies]
-monoio = { version = "0.2", features = ["sync", "utils"] }
+compio-buf = "0.8"
+compio-driver = "0.11"
+turbine-core = { path = "/mnt/c/workspace/turbine/crates/turbine-core" }
+socket2 = { version = "0.5", features = ["all"] }
+futures = "0.3"
 local-sync = "0.1"
 crossbeam-channel = "0.5"
 libc = "0.2"

@@ -41,7 +41,7 @@ struct ChildState {
     factory: ChildFactory,
     pid: Option<ProcessId>,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join_handle: Option<monoio::task::JoinHandle<()>>,
+    join_handle: Option<crate::task::JoinHandle<()>>,
     manually_stopped: bool,
 }
 
@@ -431,12 +431,13 @@ fn start_child(
     child.pid = Some(pid);
     child.shutdown_tx = Some(shutdown_tx);
 
-    let handle = monoio::spawn(async move {
+    let handle = crate::executor::spawn(async move {
         let child_future = factory();
 
-        let reason = monoio::select! {
-            reason = child_future => reason,
-            _ = shutdown_rx => ExitReason::Normal,
+        use futures::future::{select, Either};
+        let reason = match select(std::pin::pin!(shutdown_rx), std::pin::pin!(child_future)).await {
+            Either::Left((_shutdown, _child)) => ExitReason::Normal,
+            Either::Right((exit, _shutdown)) => exit,
         };
 
         let _ = msg_tx.send(SupervisorMsg::ChildExited {
@@ -466,148 +467,169 @@ async fn shutdown_all_children(children: &mut [ChildState]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{ExecutorConfig, RebarExecutor};
     use crate::supervisor::spec::RestartType;
+    use crate::time::sleep;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[monoio::test(enable_timer = true)]
-    async fn supervisor_starts_children_in_order() {
-        let rt = Runtime::new(1);
-        let order = Rc::new(RefCell::new(Vec::new()));
-        let mut entries = Vec::new();
-        for i in 0..3u32 {
-            let order = Rc::clone(&order);
-            entries.push(ChildEntry::new(
-                ChildSpec::new(format!("child_{}", i)),
-                move || {
-                    let order = Rc::clone(&order);
-                    async move {
-                        order.borrow_mut().push(i);
-                        monoio::time::sleep(Duration::from_secs(10)).await;
-                        ExitReason::Normal
-                    }
-                },
-            ));
-        }
-        let handle = start_supervisor(
-            &rt,
-            SupervisorSpec::new(RestartStrategy::OneForOne),
-            entries,
-        );
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(*order.borrow(), vec![0, 1, 2]);
-        handle.shutdown();
-        monoio::time::sleep(Duration::from_millis(50)).await;
+    fn test_executor() -> RebarExecutor {
+        RebarExecutor::new(ExecutorConfig::default()).unwrap()
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn supervisor_is_a_process_with_pid() {
-        let rt = Runtime::new(1);
-        let handle = start_supervisor(
-            &rt,
-            SupervisorSpec::new(RestartStrategy::OneForOne),
-            vec![],
-        );
-        assert_eq!(handle.pid().node_id(), 1);
-        assert!(handle.pid().local_id() > 0);
-        handle.shutdown();
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn one_for_one_restarts_only_failed_child() {
-        let rt = Runtime::new(1);
-        let sc0 = Arc::new(AtomicU32::new(0));
-        let sc1 = Arc::new(AtomicU32::new(0));
-        let sc0c = Arc::clone(&sc0);
-        let sc1c = Arc::clone(&sc1);
-        let entries = vec![
-            ChildEntry::new(ChildSpec::new("child_0"), move || {
-                let sc = Arc::clone(&sc0c);
-                async move {
-                    let c = sc.fetch_add(1, Ordering::SeqCst);
-                    if c == 0 {
-                        ExitReason::Abnormal("crash".into())
-                    } else {
-                        monoio::time::sleep(Duration::from_secs(60)).await;
-                        ExitReason::Normal
-                    }
-                }
-            }),
-            ChildEntry::new(ChildSpec::new("child_1"), move || {
-                let sc = Arc::clone(&sc1c);
-                async move {
-                    sc.fetch_add(1, Ordering::SeqCst);
-                    monoio::time::sleep(Duration::from_secs(60)).await;
-                    ExitReason::Normal
-                }
-            }),
-        ];
-        let handle = start_supervisor(
-            &rt,
-            SupervisorSpec::new(RestartStrategy::OneForOne)
-                .max_restarts(5)
-                .max_seconds(10),
-            entries,
-        );
-        monoio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(sc0.load(Ordering::SeqCst), 2);
-        assert_eq!(sc1.load(Ordering::SeqCst), 1);
-        handle.shutdown();
-        monoio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn max_restarts_within_window_escalates() {
-        let rt = Runtime::new(1);
-        let sc = Arc::new(AtomicU32::new(0));
-        let scc = Arc::clone(&sc);
-        let entries = vec![ChildEntry::new(ChildSpec::new("crasher"), move || {
-            let s = Arc::clone(&scc);
-            async move {
-                s.fetch_add(1, Ordering::SeqCst);
-                ExitReason::Abnormal("crash".into())
+    #[test]
+    fn supervisor_starts_children_in_order() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let order = Rc::new(RefCell::new(Vec::new()));
+            let mut entries = Vec::new();
+            for i in 0..3u32 {
+                let order = Rc::clone(&order);
+                entries.push(ChildEntry::new(
+                    ChildSpec::new(format!("child_{}", i)),
+                    move || {
+                        let order = Rc::clone(&order);
+                        async move {
+                            order.borrow_mut().push(i);
+                            sleep(Duration::from_secs(10)).await;
+                            ExitReason::Normal
+                        }
+                    },
+                ));
             }
-        })];
-        let handle = start_supervisor(
-            &rt,
-            SupervisorSpec::new(RestartStrategy::OneForOne)
-                .max_restarts(2)
-                .max_seconds(10),
-            entries,
-        );
-        monoio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(sc.load(Ordering::SeqCst), 3);
-        handle.shutdown();
-        monoio::time::sleep(Duration::from_millis(100)).await;
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne),
+                entries,
+            );
+            sleep(Duration::from_millis(50)).await;
+            assert_eq!(*order.borrow(), vec![0, 1, 2]);
+            handle.shutdown();
+            sleep(Duration::from_millis(50)).await;
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn one_for_one_temporary_child_never_restarts() {
-        let rt = Runtime::new(1);
-        let sc = Arc::new(AtomicU32::new(0));
-        let scc = Arc::clone(&sc);
-        let entries = vec![ChildEntry::new(
-            ChildSpec::new("tmp").restart(RestartType::Temporary),
-            move || {
-                let sc = Arc::clone(&scc);
+    #[test]
+    fn supervisor_is_a_process_with_pid() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne),
+                vec![],
+            );
+            assert_eq!(handle.pid().node_id(), 1);
+            assert!(handle.pid().local_id() > 0);
+            handle.shutdown();
+        });
+    }
+
+    #[test]
+    fn one_for_one_restarts_only_failed_child() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let sc0 = Arc::new(AtomicU32::new(0));
+            let sc1 = Arc::new(AtomicU32::new(0));
+            let sc0c = Arc::clone(&sc0);
+            let sc1c = Arc::clone(&sc1);
+            let entries = vec![
+                ChildEntry::new(ChildSpec::new("child_0"), move || {
+                    let sc = Arc::clone(&sc0c);
+                    async move {
+                        let c = sc.fetch_add(1, Ordering::SeqCst);
+                        if c == 0 {
+                            ExitReason::Abnormal("crash".into())
+                        } else {
+                            sleep(Duration::from_secs(60)).await;
+                            ExitReason::Normal
+                        }
+                    }
+                }),
+                ChildEntry::new(ChildSpec::new("child_1"), move || {
+                    let sc = Arc::clone(&sc1c);
+                    async move {
+                        sc.fetch_add(1, Ordering::SeqCst);
+                        sleep(Duration::from_secs(60)).await;
+                        ExitReason::Normal
+                    }
+                }),
+            ];
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne)
+                    .max_restarts(5)
+                    .max_seconds(10),
+                entries,
+            );
+            sleep(Duration::from_millis(500)).await;
+            assert_eq!(sc0.load(Ordering::SeqCst), 2);
+            assert_eq!(sc1.load(Ordering::SeqCst), 1);
+            handle.shutdown();
+            sleep(Duration::from_millis(100)).await;
+        });
+    }
+
+    #[test]
+    fn max_restarts_within_window_escalates() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let sc = Arc::new(AtomicU32::new(0));
+            let scc = Arc::clone(&sc);
+            let entries = vec![ChildEntry::new(ChildSpec::new("crasher"), move || {
+                let s = Arc::clone(&scc);
                 async move {
-                    sc.fetch_add(1, Ordering::SeqCst);
+                    s.fetch_add(1, Ordering::SeqCst);
                     ExitReason::Abnormal("crash".into())
                 }
-            },
-        )];
-        let handle = start_supervisor(
-            &rt,
-            SupervisorSpec::new(RestartStrategy::OneForOne)
-                .max_restarts(10)
-                .max_seconds(10),
-            entries,
-        );
-        monoio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(sc.load(Ordering::SeqCst), 1);
-        handle.shutdown();
-        monoio::time::sleep(Duration::from_millis(100)).await;
+            })];
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne)
+                    .max_restarts(2)
+                    .max_seconds(10),
+                entries,
+            );
+            sleep(Duration::from_millis(500)).await;
+            assert_eq!(sc.load(Ordering::SeqCst), 3);
+            handle.shutdown();
+            sleep(Duration::from_millis(100)).await;
+        });
+    }
+
+    #[test]
+    fn one_for_one_temporary_child_never_restarts() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let sc = Arc::new(AtomicU32::new(0));
+            let scc = Arc::clone(&sc);
+            let entries = vec![ChildEntry::new(
+                ChildSpec::new("tmp").restart(RestartType::Temporary),
+                move || {
+                    let sc = Arc::clone(&scc);
+                    async move {
+                        sc.fetch_add(1, Ordering::SeqCst);
+                        ExitReason::Abnormal("crash".into())
+                    }
+                },
+            )];
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne)
+                    .max_restarts(10)
+                    .max_seconds(10),
+                entries,
+            );
+            sleep(Duration::from_millis(300)).await;
+            assert_eq!(sc.load(Ordering::SeqCst), 1);
+            handle.shutdown();
+            sleep(Duration::from_millis(100)).await;
+        });
     }
 }

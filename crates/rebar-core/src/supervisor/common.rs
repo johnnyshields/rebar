@@ -37,16 +37,21 @@ pub(crate) fn check_restart_limit(
 pub(crate) async fn shutdown_child_task(
     strategy: &ShutdownStrategy,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join_handle: Option<monoio::task::JoinHandle<()>>,
+    join_handle: Option<crate::task::JoinHandle<()>>,
 ) {
     match (strategy, shutdown_tx, join_handle) {
-        (ShutdownStrategy::BrutalKill, _tx, Some(handle)) => {
-            // monoio JoinHandle doesn't have abort() - dropping cancels the task
+        (ShutdownStrategy::BrutalKill, tx, Some(handle)) => {
+            // Send shutdown signal to wake the task, then drop the handle
+            // to cancel it. This ensures the task's select() exits promptly
+            // rather than waiting for a long-running timer to fire.
+            if let Some(tx) = tx {
+                let _ = tx.send(());
+            }
             drop(handle);
         }
         (ShutdownStrategy::Timeout(duration), Some(tx), Some(handle)) => {
             let _ = tx.send(());
-            if monoio::time::timeout(*duration, handle).await.is_err() {
+            if crate::time::timeout(*duration, handle).await.is_err() {
                 // Timed out waiting for graceful shutdown
             }
         }

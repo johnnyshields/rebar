@@ -38,8 +38,8 @@ impl ThreadedHandle {
     }
 }
 
-/// Start a multi-threaded runtime with N OS threads, each running a monoio
-/// event loop with its own `Rc<Runtime>` and `ThreadBridge` wiring.
+/// Start a multi-threaded runtime with N OS threads, each running a rebar
+/// executor event loop with its own `Rc<Runtime>` and `ThreadBridge` wiring.
 ///
 /// The `init_fn` is called on each thread with a fully-wired `Rc<Runtime>`
 /// that has a `ThreadBridgeRouter` for cross-thread message delivery.
@@ -77,12 +77,12 @@ where
         let handle = std::thread::Builder::new()
             .name(format!("rebar-{}", thread_idx))
             .spawn(move || {
-                let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-                    .enable_timer()
-                    .build()
-                    .expect("failed to build monoio runtime");
+                let ex = crate::executor::RebarExecutor::new(
+                    crate::executor::ExecutorConfig::default(),
+                )
+                .expect("failed to build RebarExecutor");
 
-                rt.block_on(async move {
+                ex.block_on(async move {
                     let table = Rc::new(ProcessTable::new(node_id, thread_id));
                     let bridge = Rc::new(ThreadBridge::new(
                         senders,
@@ -105,7 +105,7 @@ where
                     let table_drain = Rc::clone(&table);
                     let shutdown_drain = Arc::clone(&shutdown);
                     let runtime_drain = Rc::clone(&runtime);
-                    monoio::spawn(async move {
+                    crate::executor::spawn(async move {
                         loop {
                             if shutdown_drain.load(Ordering::SeqCst) {
                                 runtime_drain.shutdown();
@@ -114,15 +114,16 @@ where
                             // Drain any pending cross-thread messages
                             bridge_drain.drain_into(&table_drain);
                             // Yield to allow other tasks to run, then check again
-                            monoio::time::sleep(std::time::Duration::from_micros(100)).await;
+                            crate::time::sleep(std::time::Duration::from_micros(100)).await;
                         }
-                    });
+                    })
+                    .detach();
 
                     init_fn(runtime);
 
                     // Keep the event loop alive until shutdown
                     while !shutdown.load(Ordering::SeqCst) {
-                        monoio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        crate::time::sleep(std::time::Duration::from_millis(10)).await;
                         bridge.drain_into(&table);
                     }
                     // Final drain

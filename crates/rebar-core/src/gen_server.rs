@@ -293,7 +293,7 @@ pub fn start_named<S: GenServer>(
 
 /// Synchronous call from outside any process (spawns a temporary process).
 ///
-/// Must be called from within the monoio runtime. Returns a future that
+/// Must be called from within the executor runtime. Returns a future that
 /// resolves when the reply arrives or the timeout expires.
 pub async fn call_from_runtime(
     runtime: &Runtime,
@@ -418,7 +418,13 @@ pub fn child_entry<S: GenServer + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{ExecutorConfig, RebarExecutor};
+    use crate::time::sleep;
     use std::time::Duration;
+
+    fn test_executor() -> RebarExecutor {
+        RebarExecutor::new(ExecutorConfig::default()).unwrap()
+    }
 
     // -- Counter server used across most tests --
 
@@ -470,8 +476,10 @@ mod tests {
     }
 
     // 1. basic_call
-    #[monoio::test(enable_timer = true)]
-    async fn basic_call() {
+    #[test]
+    fn basic_call() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
         let reply = call_from_runtime(
@@ -492,16 +500,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 2);
+        });
     }
 
     // 2. basic_cast
-    #[monoio::test(enable_timer = true)]
-    async fn basic_cast() {
+    #[test]
+    fn basic_cast() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
         cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
         // Give the cast time to process
-        monoio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let reply = call_from_runtime(
             &rt,
             pid,
@@ -511,11 +522,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 1);
+        });
     }
 
     // 3. call_timeout
-    #[monoio::test(enable_timer = true)]
-    async fn call_timeout() {
+    #[test]
+    fn call_timeout() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         // Spawn a process that never processes messages (blocks forever)
         let pid = rt.spawn(|mut ctx| async move {
@@ -532,11 +546,14 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(CallError::Timeout)));
+        });
     }
 
     // 4. handle_info
-    #[monoio::test(enable_timer = true)]
-    async fn handle_info() {
+    #[test]
+    fn handle_info() {
+        let ex = test_executor();
+        ex.block_on(async {
         let received = Rc::new(std::cell::RefCell::new(None));
 
         struct InfoServer {
@@ -594,16 +611,19 @@ mod tests {
         rt.send(pid, rmpv::Value::String("raw_info".into()))
             .unwrap();
 
-        monoio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         assert_eq!(
             received.borrow().as_ref().unwrap().as_str().unwrap(),
             "raw_info"
         );
+        });
     }
 
     // 5. stop_from_call
-    #[monoio::test(enable_timer = true)]
-    async fn stop_from_call() {
+    #[test]
+    fn stop_from_call() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
         let reply = call_from_runtime(
@@ -616,23 +636,29 @@ mod tests {
         .unwrap();
         assert_eq!(reply.as_str().unwrap(), "bye");
         // Process should exit
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
+        });
     }
 
     // 6. stop_from_cast
-    #[monoio::test(enable_timer = true)]
-    async fn stop_from_cast() {
+    #[test]
+    fn stop_from_cast() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
         cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into())).unwrap();
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
+        });
     }
 
     // 7. named_start
-    #[monoio::test(enable_timer = true)]
-    async fn named_start() {
+    #[test]
+    fn named_start() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start_named(
             &rt,
@@ -642,11 +668,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rt.whereis("my_counter"), Some(pid));
+        });
     }
 
     // 8. deferred_reply
-    #[monoio::test(enable_timer = true)]
-    async fn deferred_reply() {
+    #[test]
+    fn deferred_reply() {
+        let ex = test_executor();
+        ex.block_on(async {
         struct DeferredServer;
 
         impl GenServer for DeferredServer {
@@ -706,7 +735,7 @@ mod tests {
         // SAFETY: rt lives on the stack for the duration of this test.
         // The spawned task completes before rt is dropped.
         let rt_ptr: *const Runtime = &rt;
-        monoio::spawn(async move {
+        crate::executor::spawn(async move {
             let reply = call_from_runtime(
                 unsafe { &*rt_ptr },
                 pid,
@@ -715,28 +744,32 @@ mod tests {
             )
             .await;
             *result_clone.borrow_mut() = Some(reply);
-        });
+        })
+        .detach();
 
         // Give the call time to reach the server
-        monoio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
 
         // Trigger completion via raw info message
         rt.send(pid, rmpv::Value::String("complete".into()))
             .unwrap();
 
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
         let reply = result.borrow().as_ref().unwrap().as_ref().unwrap().clone();
         assert_eq!(reply.as_str().unwrap(), "deferred_result");
+        });
     }
 
     // 9. cast_from_runtime_test
-    #[monoio::test(enable_timer = true)]
-    async fn cast_from_runtime_test() {
+    #[test]
+    fn cast_from_runtime_test() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(10u64.into()));
         cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
         cast_from_runtime(&rt, pid, rmpv::Value::String("increment".into())).unwrap();
-        monoio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         let reply = call_from_runtime(
             &rt,
             pid,
@@ -746,11 +779,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 12);
+        });
     }
 
     // 10. init_failure
-    #[monoio::test(enable_timer = true)]
-    async fn init_failure() {
+    #[test]
+    fn init_failure() {
+        let ex = test_executor();
+        ex.block_on(async {
         struct FailServer;
 
         impl GenServer for FailServer {
@@ -783,13 +819,16 @@ mod tests {
 
         let rt = new_runtime();
         let pid = start(&rt, FailServer, rmpv::Value::Nil);
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
         assert!(!rt.is_alive(pid));
+        });
     }
 
     // 11. gen_server_context_self_pid
-    #[monoio::test(enable_timer = true)]
-    async fn gen_server_context_self_pid() {
+    #[test]
+    fn gen_server_context_self_pid() {
+        let ex = test_executor();
+        ex.block_on(async {
         struct PidReporter;
 
         impl GenServer for PidReporter {
@@ -838,6 +877,7 @@ mod tests {
         } else {
             panic!("expected array reply");
         }
+        });
     }
 
     // 12. call_error_display
@@ -860,8 +900,10 @@ mod tests {
     }
 
     // 14. raw_malformed_call_envelope
-    #[monoio::test(enable_timer = true)]
-    async fn raw_malformed_call_envelope() {
+    #[test]
+    fn raw_malformed_call_envelope() {
+        let ex = test_executor();
+        ex.block_on(async {
         let rt = new_runtime();
         let pid = start(&rt, CounterServer, rmpv::Value::Integer(0u64.into()));
 
@@ -877,7 +919,7 @@ mod tests {
         ]);
         rt.send(pid, malformed).unwrap();
 
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
 
         let reply = call_from_runtime(
             &rt,
@@ -888,11 +930,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reply.as_u64().unwrap(), 1);
+        });
     }
 
     // 15. child_entry_propagates_abnormal_exit
-    #[monoio::test(enable_timer = true)]
-    async fn child_entry_propagates_abnormal_exit() {
+    #[test]
+    fn child_entry_propagates_abnormal_exit() {
+        let ex = test_executor();
+        ex.block_on(async {
         #[derive(Clone)]
         struct FailInitServer;
 
@@ -935,11 +980,14 @@ mod tests {
             "expected Abnormal(\"init failed\"), got {:?}",
             reason
         );
+        });
     }
 
     // 16. child_entry_propagates_normal_exit
-    #[monoio::test(enable_timer = true)]
-    async fn child_entry_propagates_normal_exit() {
+    #[test]
+    fn child_entry_propagates_normal_exit() {
+        let ex = test_executor();
+        ex.block_on(async {
         #[derive(Clone)]
         struct QuickStopServer;
 
@@ -982,20 +1030,22 @@ mod tests {
 
         let result = Rc::new(std::cell::RefCell::new(None));
         let result_clone = Rc::clone(&result);
-        monoio::spawn(async move {
+        crate::executor::spawn(async move {
             let reason = factory().await;
             *result_clone.borrow_mut() = Some(reason);
-        });
+        })
+        .detach();
 
         // Wait for the server to start, then find and stop it
-        monoio::time::sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
         let pids = rt.list_processes();
         if let Some(&pid) = pids.last() {
             let _ = cast_from_runtime(&rt, pid, rmpv::Value::String("stop".into()));
         }
 
-        monoio::time::sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(200)).await;
         let reason = result.borrow().clone();
         assert!(matches!(reason, Some(ExitReason::Normal)));
+        });
     }
 }

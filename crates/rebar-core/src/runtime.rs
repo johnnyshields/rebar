@@ -101,7 +101,7 @@ impl ProcessContext {
 
     /// Returns a future that completes when the runtime begins shutting down.
     ///
-    /// Useful in `monoio::select!` to react to shutdown. Uses a proper waker
+    /// Useful in `select!` to react to shutdown. Uses a proper waker
     /// pattern — no polling loop.
     pub async fn cancelled(&self) {
         CancelledFuture {
@@ -113,7 +113,7 @@ impl ProcessContext {
 
 /// The Rebar runtime, responsible for spawning processes and routing messages.
 ///
-/// In the monoio thread-per-core model, the Runtime lives on a single thread
+/// In the thread-per-core model, the Runtime lives on a single thread
 /// and uses `Rc` for shared ownership. All methods are synchronous (no `.await`).
 pub struct Runtime {
     node_id: u64,
@@ -194,7 +194,7 @@ impl Runtime {
     /// The handler receives a `ProcessContext` and can use it to send/receive
     /// messages. Returns the new process's PID.
     ///
-    /// Note: In the monoio thread-per-core model, spawn is synchronous.
+    /// Note: In the thread-per-core model, spawn is synchronous.
     /// The handler and future need only be `'static`, not `Send`.
     pub fn spawn<F, Fut>(&self, handler: F) -> ProcessId
     where
@@ -217,10 +217,11 @@ impl Runtime {
         };
 
         let table = Rc::clone(&self.table);
-        monoio::spawn(async move {
+        crate::executor::spawn(async move {
             handler(ctx).await;
             table.remove(&pid);
-        });
+        })
+        .detach();
 
         pid
     }
@@ -284,305 +285,362 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{ExecutorConfig, RebarExecutor};
+    use crate::time::sleep;
     use std::cell::RefCell;
 
-    #[monoio::test(enable_timer = true)]
-    async fn spawn_returns_pid() {
-        let rt = Runtime::new(1);
-        let pid = rt.spawn(|_ctx| async {});
-        assert_eq!(pid.node_id(), 1);
-        assert_eq!(pid.local_id(), 1);
+    fn test_executor() -> RebarExecutor {
+        RebarExecutor::new(ExecutorConfig::default()).unwrap()
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn spawn_multiple_unique_pids() {
-        let rt = Runtime::new(1);
-        let pid1 = rt.spawn(|_ctx| async {});
-        let pid2 = rt.spawn(|_ctx| async {});
-        assert_ne!(pid1, pid2);
+    #[test]
+    fn spawn_returns_pid() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let pid = rt.spawn(|_ctx| async {});
+            assert_eq!(pid.node_id(), 1);
+            assert_eq!(pid.local_id(), 1);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn send_message_between_processes() {
-        let rt = Runtime::new(1);
-        let result = Rc::new(RefCell::new(None));
-        let result_clone = Rc::clone(&result);
-        let receiver = rt.spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+    #[test]
+    fn spawn_multiple_unique_pids() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let pid1 = rt.spawn(|_ctx| async {});
+            let pid2 = rt.spawn(|_ctx| async {});
+            assert_ne!(pid1, pid2);
         });
-        rt.spawn(move |ctx| async move {
-            ctx.send(receiver, rmpv::Value::String("hello".into()))
-                .unwrap();
-        });
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(*result.borrow(), Some("hello".to_string()));
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn self_pid_is_correct() {
-        let rt = Runtime::new(1);
-        let reported = Rc::new(Cell::new(None));
-        let reported_clone = Rc::clone(&reported);
-        let pid = rt.spawn(move |ctx| async move {
-            reported_clone.set(Some(ctx.self_pid()));
+    #[test]
+    fn send_message_between_processes() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let result = Rc::new(RefCell::new(None));
+            let result_clone = Rc::clone(&result);
+            let receiver = rt.spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+            });
+            rt.spawn(move |ctx| async move {
+                ctx.send(receiver, rmpv::Value::String("hello".into()))
+                    .unwrap();
+            });
+            sleep(Duration::from_millis(50)).await;
+            assert_eq!(*result.borrow(), Some("hello".to_string()));
         });
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(reported.get(), Some(pid));
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn send_to_dead_process_returns_error() {
-        let rt = Runtime::new(1);
-        let result = rt.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
-        assert!(result.is_err());
+    #[test]
+    fn self_pid_is_correct() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let reported = Rc::new(Cell::new(None));
+            let reported_clone = Rc::clone(&reported);
+            let pid = rt.spawn(move |ctx| async move {
+                reported_clone.set(Some(ctx.self_pid()));
+            });
+            sleep(Duration::from_millis(50)).await;
+            assert_eq!(reported.get(), Some(pid));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn recv_timeout_in_process() {
-        let rt = Runtime::new(1);
-        let was_none = Rc::new(Cell::new(false));
-        let was_none_clone = Rc::clone(&was_none);
-        rt.spawn(move |mut ctx| async move {
-            let result = ctx.recv_timeout(Duration::from_millis(10)).await;
-            was_none_clone.set(result.is_none());
+    #[test]
+    fn send_to_dead_process_returns_error() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let result = rt.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
+            assert!(result.is_err());
         });
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        assert!(was_none.get());
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn process_can_send_to_self() {
-        let rt = Runtime::new(1);
-        let result = Rc::new(RefCell::new(None));
-        let result_clone = Rc::clone(&result);
-        rt.spawn(move |mut ctx| async move {
-            let me = ctx.self_pid();
-            ctx.send(me, rmpv::Value::String("self-msg".into()))
-                .unwrap();
-            let msg = ctx.recv().await.unwrap();
-            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+    #[test]
+    fn recv_timeout_in_process() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let was_none = Rc::new(Cell::new(false));
+            let was_none_clone = Rc::clone(&was_none);
+            rt.spawn(move |mut ctx| async move {
+                let result = ctx.recv_timeout(Duration::from_millis(10)).await;
+                was_none_clone.set(result.is_none());
+            });
+            sleep(Duration::from_millis(100)).await;
+            assert!(was_none.get());
         });
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(*result.borrow(), Some("self-msg".to_string()));
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn chain_of_three_processes() {
-        let rt = Runtime::new(1);
-        let result = Rc::new(Cell::new(0u64));
-        let result_clone = Rc::clone(&result);
-        let c = rt.spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            result_clone.set(msg.payload().as_u64().unwrap());
+    #[test]
+    fn process_can_send_to_self() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let result = Rc::new(RefCell::new(None));
+            let result_clone = Rc::clone(&result);
+            rt.spawn(move |mut ctx| async move {
+                let me = ctx.self_pid();
+                ctx.send(me, rmpv::Value::String("self-msg".into()))
+                    .unwrap();
+                let msg = ctx.recv().await.unwrap();
+                *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+            });
+            sleep(Duration::from_millis(50)).await;
+            assert_eq!(*result.borrow(), Some("self-msg".to_string()));
         });
-        let b = rt.spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            let val = msg.payload().as_u64().unwrap();
-            ctx.send(c, rmpv::Value::Integer((val + 1).into()))
-                .unwrap();
-        });
-        rt.spawn(move |ctx| async move {
-            ctx.send(b, rmpv::Value::Integer(1u64.into())).unwrap();
-        });
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(result.get(), 2);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn fan_out_fan_in() {
-        let rt = Runtime::new(1);
-        let results = Rc::new(RefCell::new(Vec::new()));
-        let mut workers = Vec::new();
-        for _ in 0..5 {
-            let results = Rc::clone(&results);
-            let pid = rt.spawn(move |mut ctx| async move {
+    #[test]
+    fn chain_of_three_processes() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let result = Rc::new(Cell::new(0u64));
+            let result_clone = Rc::clone(&result);
+            let c = rt.spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                result_clone.set(msg.payload().as_u64().unwrap());
+            });
+            let b = rt.spawn(move |mut ctx| async move {
                 let msg = ctx.recv().await.unwrap();
                 let val = msg.payload().as_u64().unwrap();
-                results.borrow_mut().push(val * 2);
-            });
-            workers.push(pid);
-        }
-        rt.spawn(move |ctx| async move {
-            for (i, pid) in workers.iter().enumerate() {
-                ctx.send(*pid, rmpv::Value::Integer((i as u64).into()))
+                ctx.send(c, rmpv::Value::Integer((val + 1).into()))
                     .unwrap();
-            }
-        });
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        let mut r = results.borrow().clone();
-        r.sort();
-        assert_eq!(r, vec![0, 2, 4, 6, 8]);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn spawn_100_processes() {
-        let rt = Runtime::new(1);
-        let count = Rc::new(Cell::new(0u64));
-        for _ in 0..100u64 {
-            let count = Rc::clone(&count);
-            rt.spawn(move |_ctx| async move {
-                count.set(count.get() + 1);
             });
-        }
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(count.get(), 100);
+            rt.spawn(move |ctx| async move {
+                ctx.send(b, rmpv::Value::Integer(1u64.into())).unwrap();
+            });
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(result.get(), 2);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn node_id_accessor() {
-        let rt = Runtime::new(42);
-        assert_eq!(rt.node_id(), 42);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn multiple_messages_to_same_process() {
-        let rt = Runtime::new(1);
-        let result = Rc::new(Cell::new(0u64));
-        let result_clone = Rc::clone(&result);
-        let receiver = rt.spawn(move |mut ctx| async move {
-            let mut sum = 0u64;
+    #[test]
+    fn fan_out_fan_in() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let results = Rc::new(RefCell::new(Vec::new()));
+            let mut workers = Vec::new();
             for _ in 0..5 {
-                let msg = ctx.recv().await.unwrap();
-                sum += msg.payload().as_u64().unwrap();
+                let results = Rc::clone(&results);
+                let pid = rt.spawn(move |mut ctx| async move {
+                    let msg = ctx.recv().await.unwrap();
+                    let val = msg.payload().as_u64().unwrap();
+                    results.borrow_mut().push(val * 2);
+                });
+                workers.push(pid);
             }
-            result_clone.set(sum);
+            rt.spawn(move |ctx| async move {
+                for (i, pid) in workers.iter().enumerate() {
+                    ctx.send(*pid, rmpv::Value::Integer((i as u64).into()))
+                        .unwrap();
+                }
+            });
+            sleep(Duration::from_millis(100)).await;
+            let mut r = results.borrow().clone();
+            r.sort();
+            assert_eq!(r, vec![0, 2, 4, 6, 8]);
         });
-        for i in 1..=5u64 {
-            rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
-        }
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(result.get(), 15);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn process_context_send_returns_error_for_dead_target() {
-        let rt = Runtime::new(1);
-        let was_err = Rc::new(Cell::new(false));
-        let was_err_clone = Rc::clone(&was_err);
-        rt.spawn(move |ctx| async move {
-            let result = ctx.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
-            was_err_clone.set(result.is_err());
-        });
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert!(was_err.get());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn cancellation_flag_propagates() {
-        let rt = Runtime::new(1);
-        let initially_not_shutting = Rc::new(Cell::new(false));
-        let initially_clone = Rc::clone(&initially_not_shutting);
-
-        rt.spawn(move |ctx| async move {
-            initially_clone.set(!ctx.is_shutting_down());
-            ctx.cancelled().await;
-        });
-
-        monoio::time::sleep(Duration::from_millis(50)).await;
-        assert!(initially_not_shutting.get());
-
-        rt.shutdown();
-        monoio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn bounded_mailbox_capacity_respected() {
-        let rt = Runtime::new(1).with_mailbox_capacity(2);
-        let received = Rc::new(Cell::new(0u64));
-        let received_clone = Rc::clone(&received);
-
-        let receiver = rt.spawn(move |mut ctx| async move {
-            monoio::time::sleep(Duration::from_millis(200)).await;
-            let mut count = 0u64;
-            while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
-                count += 1;
+    #[test]
+    fn spawn_100_processes() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let count = Rc::new(Cell::new(0u64));
+            for _ in 0..100u64 {
+                let count = Rc::clone(&count);
+                rt.spawn(move |_ctx| async move {
+                    count.set(count.get() + 1);
+                });
             }
-            received_clone.set(count);
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(count.get(), 100);
         });
-
-        let mut sent = 0u64;
-        for i in 0..5u64 {
-            match rt.send(receiver, rmpv::Value::Integer(i.into())) {
-                Ok(()) => sent += 1,
-                Err(SendError::MailboxFull(_)) => {}
-                Err(e) => panic!("unexpected error: {e}"),
-            }
-        }
-
-        assert_eq!(sent, 2);
-
-        monoio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(received.get(), 2);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn unbounded_mailbox_default_preserved() {
-        let rt = Runtime::new(1);
-        let received = Rc::new(Cell::new(0u64));
-        let received_clone = Rc::clone(&received);
-
-        let receiver = rt.spawn(move |mut ctx| async move {
-            monoio::time::sleep(Duration::from_millis(100)).await;
-            let mut count = 0u64;
-            while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
-                count += 1;
-            }
-            received_clone.set(count);
+    #[test]
+    fn node_id_accessor() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(42);
+            assert_eq!(rt.node_id(), 42);
         });
-
-        for i in 0..100u64 {
-            rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
-        }
-
-        monoio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(received.get(), 100);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn runtime_with_custom_router() {
+    #[test]
+    fn multiple_messages_to_same_process() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let result = Rc::new(Cell::new(0u64));
+            let result_clone = Rc::clone(&result);
+            let receiver = rt.spawn(move |mut ctx| async move {
+                let mut sum = 0u64;
+                for _ in 0..5 {
+                    let msg = ctx.recv().await.unwrap();
+                    sum += msg.payload().as_u64().unwrap();
+                }
+                result_clone.set(sum);
+            });
+            for i in 1..=5u64 {
+                rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
+            }
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(result.get(), 15);
+        });
+    }
+
+    #[test]
+    fn process_context_send_returns_error_for_dead_target() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let was_err = Rc::new(Cell::new(false));
+            let was_err_clone = Rc::clone(&was_err);
+            rt.spawn(move |ctx| async move {
+                let result = ctx.send(ProcessId::new(1, 0, 999), rmpv::Value::Nil);
+                was_err_clone.set(result.is_err());
+            });
+            sleep(Duration::from_millis(50)).await;
+            assert!(was_err.get());
+        });
+    }
+
+    #[test]
+    fn cancellation_flag_propagates() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let initially_not_shutting = Rc::new(Cell::new(false));
+            let initially_clone = Rc::clone(&initially_not_shutting);
+
+            rt.spawn(move |ctx| async move {
+                initially_clone.set(!ctx.is_shutting_down());
+                ctx.cancelled().await;
+            });
+
+            sleep(Duration::from_millis(50)).await;
+            assert!(initially_not_shutting.get());
+
+            rt.shutdown();
+            sleep(Duration::from_millis(50)).await;
+        });
+    }
+
+    #[test]
+    fn bounded_mailbox_capacity_respected() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1).with_mailbox_capacity(2);
+            let received = Rc::new(Cell::new(0u64));
+            let received_clone = Rc::clone(&received);
+
+            let receiver = rt.spawn(move |mut ctx| async move {
+                sleep(Duration::from_millis(200)).await;
+                let mut count = 0u64;
+                while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
+                    count += 1;
+                }
+                received_clone.set(count);
+            });
+
+            let mut sent = 0u64;
+            for i in 0..5u64 {
+                match rt.send(receiver, rmpv::Value::Integer(i.into())) {
+                    Ok(()) => sent += 1,
+                    Err(SendError::MailboxFull(_)) => {}
+                    Err(e) => panic!("unexpected error: {e}"),
+                }
+            }
+
+            assert_eq!(sent, 2);
+
+            sleep(Duration::from_millis(500)).await;
+            assert_eq!(received.get(), 2);
+        });
+    }
+
+    #[test]
+    fn unbounded_mailbox_default_preserved() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let received = Rc::new(Cell::new(0u64));
+            let received_clone = Rc::clone(&received);
+
+            let receiver = rt.spawn(move |mut ctx| async move {
+                sleep(Duration::from_millis(100)).await;
+                let mut count = 0u64;
+                while let Some(_msg) = ctx.recv_timeout(Duration::from_millis(50)).await {
+                    count += 1;
+                }
+                received_clone.set(count);
+            });
+
+            for i in 0..100u64 {
+                rt.send(receiver, rmpv::Value::Integer(i.into())).unwrap();
+            }
+
+            sleep(Duration::from_millis(500)).await;
+            assert_eq!(received.get(), 100);
+        });
+    }
+
+    #[test]
+    fn runtime_with_custom_router() {
         use crate::router::MessageRouter;
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        struct CountingRouter {
-            count: AtomicU64,
-            inner: crate::router::LocalRouter,
-        }
-        impl MessageRouter for CountingRouter {
-            fn route(
-                &self,
-                from: ProcessId,
-                to: ProcessId,
-                payload: rmpv::Value,
-            ) -> Result<(), SendError> {
-                self.count.fetch_add(1, Ordering::Relaxed);
-                self.inner.route(from, to, payload)
+        let ex = test_executor();
+        ex.block_on(async {
+            struct CountingRouter {
+                count: AtomicU64,
+                inner: crate::router::LocalRouter,
             }
-        }
+            impl MessageRouter for CountingRouter {
+                fn route(
+                    &self,
+                    from: ProcessId,
+                    to: ProcessId,
+                    payload: rmpv::Value,
+                ) -> Result<(), SendError> {
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                    self.inner.route(from, to, payload)
+                }
+            }
 
-        let table = Rc::new(crate::process::table::ProcessTable::new(1, 0));
-        let router = Rc::new(CountingRouter {
-            count: AtomicU64::new(0),
-            inner: crate::router::LocalRouter::new(Rc::clone(&table)),
+            let table = Rc::new(crate::process::table::ProcessTable::new(1, 0));
+            let router = Rc::new(CountingRouter {
+                count: AtomicU64::new(0),
+                inner: crate::router::LocalRouter::new(Rc::clone(&table)),
+            });
+            let counter_ref = Rc::clone(&router);
+
+            let rt = Runtime::with_router(1, Rc::clone(&table), router as Rc<dyn MessageRouter>);
+            let result = Rc::new(RefCell::new(None));
+            let result_clone = Rc::clone(&result);
+
+            let receiver = rt.spawn(move |mut ctx| async move {
+                let msg = ctx.recv().await.unwrap();
+                *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
+            });
+
+            rt.spawn(move |ctx| async move {
+                ctx.send(receiver, rmpv::Value::String("routed".into()))
+                    .unwrap();
+            });
+
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(*result.borrow(), Some("routed".to_string()));
+            assert!(counter_ref.count.load(std::sync::atomic::Ordering::Relaxed) > 0);
         });
-        let counter_ref = Rc::clone(&router);
-
-        let rt = Runtime::with_router(1, Rc::clone(&table), router as Rc<dyn MessageRouter>);
-        let result = Rc::new(RefCell::new(None));
-        let result_clone = Rc::clone(&result);
-
-        let receiver = rt.spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            *result_clone.borrow_mut() = Some(msg.payload().as_str().unwrap().to_string());
-        });
-
-        rt.spawn(move |ctx| async move {
-            ctx.send(receiver, rmpv::Value::String("routed".into()))
-                .unwrap();
-        });
-
-        monoio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(*result.borrow(), Some("routed".to_string()));
-        assert!(counter_ref.count.load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 }
