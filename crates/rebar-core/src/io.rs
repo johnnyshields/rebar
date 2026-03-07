@@ -55,6 +55,9 @@ impl compio_buf::IoBuf for LeaseIoBuf {
 }
 
 impl compio_buf::SetLen for LeaseIoBuf {
+    // SAFETY: The caller (compio after a kernel read) guarantees that the first
+    // `len` bytes of the underlying arena allocation have been initialized.
+    // We only track this count; no memory is freed or reallocated.
     unsafe fn set_len(&mut self, len: usize) {
         self.init_len = len;
     }
@@ -62,7 +65,10 @@ impl compio_buf::SetLen for LeaseIoBuf {
 
 impl compio_buf::IoBufMut for LeaseIoBuf {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        // Return FULL capacity — kernel writes into this region.
+        // SAFETY: LeasedBuffer owns a contiguous arena allocation of `self.lease.len()`
+        // bytes. Casting `*mut u8` to `*mut MaybeUninit<u8>` is sound because
+        // MaybeUninit<u8> has the same size/alignment as u8. The slice length
+        // covers the full allocation so the kernel can write anywhere in it.
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.lease.as_mut_slice().as_mut_ptr() as *mut MaybeUninit<u8>,
@@ -275,24 +281,42 @@ impl TcpStream {
     ///
     /// Returns the buffer after all bytes have been sent.
     pub async fn write_all(&self, buf: Vec<u8>) -> BufResult<(), Vec<u8>> {
-        let mut written = 0;
         let total = buf.len();
-        let buf = buf;
-        while written < total {
-            let slice = buf[written..].to_vec();
-            let BufResult(result, _) = self.write(slice).await;
+        // First write uses the original buffer directly (no copy).
+        let BufResult(result, mut remaining) = self.write(buf).await;
+        match result {
+            Ok(0) => {
+                return BufResult(
+                    Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0")),
+                    remaining,
+                );
+            }
+            Ok(n) if n >= total => return BufResult(Ok(()), remaining),
+            Ok(n) => {
+                // Partial write: drain consumed prefix, reuse the allocation.
+                remaining.drain(..n);
+            }
+            Err(e) => return BufResult(Err(e), remaining),
+        }
+        // Subsequent writes reuse the same shrinking Vec.
+        loop {
+            let len = remaining.len();
+            let BufResult(result, returned) = self.write(remaining).await;
+            remaining = returned;
             match result {
                 Ok(0) => {
                     return BufResult(
                         Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0")),
-                        buf,
+                        remaining,
                     );
                 }
-                Ok(n) => written += n,
-                Err(e) => return BufResult(Err(e), buf),
+                Ok(n) if n >= len => return BufResult(Ok(()), remaining),
+                Ok(n) => {
+                    remaining.drain(..n);
+                }
+                Err(e) => return BufResult(Err(e), remaining),
             }
         }
-        BufResult(Ok(()), buf)
     }
 
     /// Read into a `LeasedBuffer` (zero-copy from epoch arena).
