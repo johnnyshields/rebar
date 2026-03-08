@@ -1,0 +1,539 @@
+   Compiling rebar-core v0.1.0 (/home/alexandernicholson/.pxycrab/workspace/rebar/crates/rebar-core)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 32.99s
+     Running unittests src/lib.rs (target/release/deps/rebar_core-d16dc3c80d61c11c)
+
+running 107 tests
+test process::mailbox::tests::bounded_capacity_respected ... ignored
+test process::mailbox::tests::bounded_send_after_drain ... ignored
+test process::mailbox::tests::bounded_try_send_full_returns_mailbox_full ... ignored
+test process::mailbox::tests::concurrent_senders ... ignored
+test process::mailbox::tests::dropped_sender_closes_receiver ... ignored
+test process::mailbox::tests::large_message_throughput ... ignored
+test process::mailbox::tests::multiple_messages_fifo ... ignored
+test process::mailbox::tests::recv_timeout_expires ... ignored
+test process::mailbox::tests::recv_timeout_receives_in_time ... ignored
+test process::mailbox::tests::recv_timeout_zero_duration ... ignored
+test process::mailbox::tests::send_to_closed_receiver_returns_error ... ignored
+test process::mailbox::tests::unbounded_send_receive ... ignored
+test process::monitor::tests::link_set_add_and_contains ... ignored
+test process::monitor::tests::link_set_duplicate_add_is_idempotent ... ignored
+test process::monitor::tests::link_set_linked_pids_iter ... ignored
+test process::monitor::tests::link_set_remove ... ignored
+test process::monitor::tests::monitor_ref_is_copy ... ignored
+test process::monitor::tests::monitor_ref_unique ... ignored
+test process::monitor::tests::monitor_set_add_and_query ... ignored
+test process::monitor::tests::monitor_set_different_targets ... ignored
+test process::monitor::tests::monitor_set_multiple_monitors_same_target ... ignored
+test process::monitor::tests::monitor_set_remove ... ignored
+test process::monitor::tests::monitor_set_remove_nonexistent_is_noop ... ignored
+test process::monitor::tests::monitor_set_remove_one_of_many ... ignored
+test process::table::tests::allocate_pid_increments ... ignored
+test process::table::tests::allocate_pid_node_id_preserved ... ignored
+test process::table::tests::concurrent_allocate_pids_unique ... ignored
+test process::table::tests::concurrent_insert_and_send ... ignored
+test process::table::tests::insert_and_lookup ... ignored
+test process::table::tests::is_empty ... ignored
+test process::table::tests::lookup_missing_returns_none ... ignored
+test process::table::tests::process_count ... ignored
+test process::table::tests::remove_nonexistent_is_noop ... ignored
+test process::table::tests::remove_process ... ignored
+test process::table::tests::send_to_dead_process_returns_error ... ignored
+test process::table::tests::send_to_process ... ignored
+test process::types::tests::exit_reason_abnormal_is_not_normal ... ignored
+test process::types::tests::exit_reason_kill_is_not_normal ... ignored
+test process::types::tests::exit_reason_linked_exit ... ignored
+test process::types::tests::exit_reason_normal_is_normal ... ignored
+test process::types::tests::message_creation ... ignored
+test process::types::tests::message_with_binary_payload ... ignored
+test process::types::tests::message_with_map_payload ... ignored
+test process::types::tests::message_with_nested_array ... ignored
+test process::types::tests::message_with_nil_payload ... ignored
+test process::types::tests::process_id_accessors ... ignored
+test process::types::tests::process_id_debug ... ignored
+test process::types::tests::process_id_display ... ignored
+test process::types::tests::process_id_equality ... ignored
+test process::types::tests::process_id_hash_dedup ... ignored
+test process::types::tests::process_id_inequality_different_local ... ignored
+test process::types::tests::process_id_inequality_different_node ... ignored
+test process::types::tests::process_id_is_copy ... ignored
+test process::types::tests::send_error_display ... ignored
+test router::tests::local_router_delivers_locally ... ignored
+test router::tests::local_router_is_send_sync ... ignored
+test router::tests::local_router_rejects_unknown_pid ... ignored
+test runtime::tests::chain_of_three_processes ... ignored
+test runtime::tests::fan_out_fan_in ... ignored
+test runtime::tests::multiple_messages_to_same_process ... ignored
+test runtime::tests::node_id_accessor ... ignored
+test runtime::tests::process_can_send_to_self ... ignored
+test runtime::tests::process_context_send_returns_error_for_dead_target ... ignored
+test runtime::tests::process_panic_does_not_crash_runtime ... ignored
+test runtime::tests::recv_timeout_in_process ... ignored
+test runtime::tests::runtime_with_custom_router ... ignored
+test runtime::tests::self_pid_is_correct ... ignored
+test runtime::tests::send_message_between_processes ... ignored
+test runtime::tests::send_to_dead_process_returns_error ... ignored
+test runtime::tests::spawn_100_processes ... ignored
+test runtime::tests::spawn_multiple_unique_pids ... ignored
+test runtime::tests::spawn_returns_pid ... ignored
+test supervisor::engine::tests::add_child_dynamically ... ignored
+test supervisor::engine::tests::brutal_kill_immediate ... ignored
+test supervisor::engine::tests::child_exit_sends_signal_to_linked ... ignored
+test supervisor::engine::tests::graceful_shutdown_sends_exit_signal ... ignored
+test supervisor::engine::tests::max_restarts_within_window_escalates ... ignored
+test supervisor::engine::tests::max_restarts_zero_means_never_restart ... ignored
+test supervisor::engine::tests::nested_supervisor_escalation ... ignored
+test supervisor::engine::tests::nested_supervisor_independent_restart ... ignored
+test supervisor::engine::tests::no_trap_exit_propagates_death ... ignored
+test supervisor::engine::tests::one_for_all_restarts_all_on_single_failure ... ignored
+test supervisor::engine::tests::one_for_all_stops_in_reverse_starts_in_order ... ignored
+test supervisor::engine::tests::one_for_one_other_children_unaffected ... ignored
+test supervisor::engine::tests::one_for_one_permanent_child_always_restarts ... ignored
+test supervisor::engine::tests::one_for_one_restarts_only_failed_child ... ignored
+test supervisor::engine::tests::one_for_one_temporary_child_never_restarts ... ignored
+test supervisor::engine::tests::one_for_one_transient_child_abnormal_restarts ... ignored
+test supervisor::engine::tests::one_for_one_transient_child_normal_exit_no_restart ... ignored
+test supervisor::engine::tests::rest_for_one_earlier_children_unaffected ... ignored
+test supervisor::engine::tests::rest_for_one_restarts_failed_and_subsequent ... ignored
+test supervisor::engine::tests::restarts_outside_window_reset_counter ... ignored
+test supervisor::engine::tests::shutdown_timeout_respected ... ignored
+test supervisor::engine::tests::supervisor_is_a_process_with_pid ... ignored
+test supervisor::engine::tests::supervisor_starts_children_in_order ... ignored
+test supervisor::engine::tests::supervisor_stops_children_in_reverse_order ... ignored
+test supervisor::engine::tests::trap_exit_converts_signal_to_message ... ignored
+test supervisor::spec::tests::child_spec_builder ... ignored
+test supervisor::spec::tests::child_spec_defaults ... ignored
+test supervisor::spec::tests::permanent_restarts_on_abnormal ... ignored
+test supervisor::spec::tests::permanent_restarts_on_kill ... ignored
+test supervisor::spec::tests::permanent_restarts_on_normal ... ignored
+test supervisor::spec::tests::supervisor_spec_builder ... ignored
+test supervisor::spec::tests::supervisor_spec_with_children ... ignored
+test supervisor::spec::tests::temporary_never_restarts ... ignored
+test supervisor::spec::tests::transient_does_not_restart_on_normal ... ignored
+test supervisor::spec::tests::transient_restarts_on_abnormal ... ignored
+
+test result: ok. 0 passed; 0 failed; 107 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/message_passing.rs (target/release/deps/message_passing-ce28d9c89230ba9b)
+Gnuplot not found, using plotters backend
+Benchmarking message_passing/ping_pong/100
+Benchmarking message_passing/ping_pong/100: Warming up for 3.0000 s
+Benchmarking message_passing/ping_pong/100: Collecting 100 samples in estimated 5.0942 s (121k iterations)
+Benchmarking message_passing/ping_pong/100: Analyzing
+message_passing/ping_pong/100
+                        time:   [41.310 µs 42.026 µs 42.966 µs]
+                        thrpt:  [2.3274 Melem/s 2.3795 Melem/s 2.4207 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking message_passing/ping_pong/1000
+Benchmarking message_passing/ping_pong/1000: Warming up for 3.0000 s
+Benchmarking message_passing/ping_pong/1000: Collecting 100 samples in estimated 5.4925 s (20k iterations)
+Benchmarking message_passing/ping_pong/1000: Analyzing
+message_passing/ping_pong/1000
+                        time:   [264.65 µs 267.28 µs 270.64 µs]
+                        thrpt:  [3.6950 Melem/s 3.7414 Melem/s 3.7785 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking message_passing/ping_pong/10000
+Benchmarking message_passing/ping_pong/10000: Warming up for 3.0000 s
+Benchmarking message_passing/ping_pong/10000: Collecting 100 samples in estimated 5.1078 s (2000 iterations)
+Benchmarking message_passing/ping_pong/10000: Analyzing
+message_passing/ping_pong/10000
+                        time:   [2.5023 ms 2.5231 ms 2.5478 ms]
+                        thrpt:  [3.9250 Melem/s 3.9633 Melem/s 3.9964 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking message_passing/fan_out/10
+Benchmarking message_passing/fan_out/10: Warming up for 3.0000 s
+Benchmarking message_passing/fan_out/10: Collecting 100 samples in estimated 5.0011 s (96k iterations)
+Benchmarking message_passing/fan_out/10: Analyzing
+message_passing/fan_out/10
+                        time:   [51.425 µs 51.950 µs 52.537 µs]
+                        thrpt:  [190.34 Kelem/s 192.49 Kelem/s 194.46 Kelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking message_passing/fan_out/50
+Benchmarking message_passing/fan_out/50: Warming up for 3.0000 s
+Benchmarking message_passing/fan_out/50: Collecting 100 samples in estimated 5.6077 s (40k iterations)
+Benchmarking message_passing/fan_out/50: Analyzing
+message_passing/fan_out/50
+                        time:   [136.24 µs 136.91 µs 137.65 µs]
+                        thrpt:  [363.25 Kelem/s 365.19 Kelem/s 367.00 Kelem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking message_passing/fan_out/100
+Benchmarking message_passing/fan_out/100: Warming up for 3.0000 s
+Benchmarking message_passing/fan_out/100: Collecting 100 samples in estimated 5.2403 s (20k iterations)
+Benchmarking message_passing/fan_out/100: Analyzing
+message_passing/fan_out/100
+                        time:   [256.79 µs 258.91 µs 261.65 µs]
+                        thrpt:  [382.19 Kelem/s 386.23 Kelem/s 389.42 Kelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking message_passing/fan_in/10
+Benchmarking message_passing/fan_in/10: Warming up for 3.0000 s
+Benchmarking message_passing/fan_in/10: Collecting 100 samples in estimated 5.1169 s (91k iterations)
+Benchmarking message_passing/fan_in/10: Analyzing
+message_passing/fan_in/10
+                        time:   [55.282 µs 55.890 µs 56.816 µs]
+                        thrpt:  [176.01 Kelem/s 178.92 Kelem/s 180.89 Kelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  8 (8.00%) low mild
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking message_passing/fan_in/50
+Benchmarking message_passing/fan_in/50: Warming up for 3.0000 s
+Benchmarking message_passing/fan_in/50: Collecting 100 samples in estimated 5.2537 s (35k iterations)
+Benchmarking message_passing/fan_in/50: Analyzing
+message_passing/fan_in/50
+                        time:   [152.22 µs 153.81 µs 155.74 µs]
+                        thrpt:  [321.06 Kelem/s 325.07 Kelem/s 328.47 Kelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking message_passing/fan_in/100
+Benchmarking message_passing/fan_in/100: Warming up for 3.0000 s
+Benchmarking message_passing/fan_in/100: Collecting 100 samples in estimated 6.1628 s (20k iterations)
+Benchmarking message_passing/fan_in/100: Analyzing
+message_passing/fan_in/100
+                        time:   [307.15 µs 308.71 µs 310.49 µs]
+                        thrpt:  [322.07 Kelem/s 323.93 Kelem/s 325.57 Kelem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking message_passing/message_size/send_recv/nil
+Benchmarking message_passing/message_size/send_recv/nil: Warming up for 3.0000 s
+Benchmarking message_passing/message_size/send_recv/nil: Collecting 100 samples in estimated 5.1388 s (136k iterations)
+Benchmarking message_passing/message_size/send_recv/nil: Analyzing
+message_passing/message_size/send_recv/nil
+                        time:   [36.659 µs 36.897 µs 37.138 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking message_passing/message_size/send_recv/small_string
+Benchmarking message_passing/message_size/send_recv/small_string: Warming up for 3.0000 s
+Benchmarking message_passing/message_size/send_recv/small_string: Collecting 100 samples in estimated 5.1750 s (136k iterations)
+Benchmarking message_passing/message_size/send_recv/small_string: Analyzing
+message_passing/message_size/send_recv/small_string
+                        time:   [36.965 µs 37.361 µs 37.879 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking message_passing/message_size/send_recv/1kb_binary
+Benchmarking message_passing/message_size/send_recv/1kb_binary: Warming up for 3.0000 s
+Benchmarking message_passing/message_size/send_recv/1kb_binary: Collecting 100 samples in estimated 5.1301 s (136k iterations)
+Benchmarking message_passing/message_size/send_recv/1kb_binary: Analyzing
+message_passing/message_size/send_recv/1kb_binary
+                        time:   [37.192 µs 37.809 µs 38.716 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking message_passing/message_size/send_recv/64kb_binary
+Benchmarking message_passing/message_size/send_recv/64kb_binary: Warming up for 3.0000 s
+Benchmarking message_passing/message_size/send_recv/64kb_binary: Collecting 100 samples in estimated 5.0961 s (126k iterations)
+Benchmarking message_passing/message_size/send_recv/64kb_binary: Analyzing
+message_passing/message_size/send_recv/64kb_binary
+                        time:   [40.129 µs 40.648 µs 41.490 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) low mild
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+
+     Running benches/process_lifecycle.rs (target/release/deps/process_lifecycle-2a23ddd31fa6e81f)
+Gnuplot not found, using plotters backend
+Benchmarking process_lifecycle/spawn_single
+Benchmarking process_lifecycle/spawn_single: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_single: Collecting 100 samples in estimated 5.0406 s (141k iterations)
+Benchmarking process_lifecycle/spawn_single: Analyzing
+process_lifecycle/spawn_single
+                        time:   [36.603 µs 37.381 µs 38.217 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking process_lifecycle/spawn_batch/10
+Benchmarking process_lifecycle/spawn_batch/10: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_batch/10: Collecting 100 samples in estimated 5.1307 s (101k iterations)
+Benchmarking process_lifecycle/spawn_batch/10: Analyzing
+process_lifecycle/spawn_batch/10
+                        time:   [50.065 µs 50.887 µs 51.873 µs]
+                        thrpt:  [192.78 Kelem/s 196.51 Kelem/s 199.74 Kelem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking process_lifecycle/spawn_batch/100
+Benchmarking process_lifecycle/spawn_batch/100: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_batch/100: Collecting 100 samples in estimated 5.0248 s (15k iterations)
+Benchmarking process_lifecycle/spawn_batch/100: Analyzing
+process_lifecycle/spawn_batch/100
+                        time:   [324.52 µs 325.84 µs 327.27 µs]
+                        thrpt:  [305.56 Kelem/s 306.90 Kelem/s 308.15 Kelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking process_lifecycle/spawn_batch/1000
+Benchmarking process_lifecycle/spawn_batch/1000: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_batch/1000: Collecting 100 samples in estimated 5.2261 s (1600 iterations)
+Benchmarking process_lifecycle/spawn_batch/1000: Analyzing
+process_lifecycle/spawn_batch/1000
+                        time:   [3.2510 ms 3.2605 ms 3.2702 ms]
+                        thrpt:  [305.80 Kelem/s 306.70 Kelem/s 307.60 Kelem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking process_lifecycle/spawn_teardown/10
+Benchmarking process_lifecycle/spawn_teardown/10: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_teardown/10: Collecting 100 samples in estimated 5.1254 s (136k iterations)
+Benchmarking process_lifecycle/spawn_teardown/10: Analyzing
+process_lifecycle/spawn_teardown/10
+                        time:   [38.142 µs 38.558 µs 39.059 µs]
+                        thrpt:  [256.02 Kelem/s 259.35 Kelem/s 262.18 Kelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking process_lifecycle/spawn_teardown/100
+Benchmarking process_lifecycle/spawn_teardown/100: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_teardown/100: Collecting 100 samples in estimated 5.8469 s (20k iterations)
+Benchmarking process_lifecycle/spawn_teardown/100: Analyzing
+process_lifecycle/spawn_teardown/100
+                        time:   [289.93 µs 291.43 µs 293.00 µs]
+                        thrpt:  [341.30 Kelem/s 343.14 Kelem/s 344.91 Kelem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking process_lifecycle/spawn_teardown/500
+Benchmarking process_lifecycle/spawn_teardown/500: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.4s, enable flat sampling, or reduce sample count to 50.
+Benchmarking process_lifecycle/spawn_teardown/500: Collecting 100 samples in estimated 7.4347 s (5050 iterations)
+Benchmarking process_lifecycle/spawn_teardown/500: Analyzing
+process_lifecycle/spawn_teardown/500
+                        time:   [1.4493 ms 1.4594 ms 1.4701 ms]
+                        thrpt:  [340.12 Kelem/s 342.60 Kelem/s 344.98 Kelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking process_lifecycle/spawn_and_send
+Benchmarking process_lifecycle/spawn_and_send: Warming up for 3.0000 s
+Benchmarking process_lifecycle/spawn_and_send: Collecting 100 samples in estimated 5.0389 s (136k iterations)
+Benchmarking process_lifecycle/spawn_and_send: Analyzing
+process_lifecycle/spawn_and_send
+                        time:   [36.472 µs 36.680 µs 36.906 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+
+     Running benches/process_table.rs (target/release/deps/process_table-095f33f7ad26963b)
+Gnuplot not found, using plotters backend
+Benchmarking process_table/allocate_pid/single_thread
+Benchmarking process_table/allocate_pid/single_thread: Warming up for 3.0000 s
+Benchmarking process_table/allocate_pid/single_thread: Collecting 100 samples in estimated 5.0000 s (919M iterations)
+Benchmarking process_table/allocate_pid/single_thread: Analyzing
+process_table/allocate_pid/single_thread
+                        time:   [5.4057 ns 5.4388 ns 5.4771 ns]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+Benchmarking process_table/allocate_pid/contended/2
+Benchmarking process_table/allocate_pid/contended/2: Warming up for 3.0000 s
+Benchmarking process_table/allocate_pid/contended/2: Collecting 100 samples in estimated 5.1341 s (56k iterations)
+Benchmarking process_table/allocate_pid/contended/2: Analyzing
+process_table/allocate_pid/contended/2
+                        time:   [91.347 µs 92.429 µs 94.121 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking process_table/allocate_pid/contended/4
+Benchmarking process_table/allocate_pid/contended/4: Warming up for 3.0000 s
+Benchmarking process_table/allocate_pid/contended/4: Collecting 100 samples in estimated 5.0251 s (35k iterations)
+Benchmarking process_table/allocate_pid/contended/4: Analyzing
+process_table/allocate_pid/contended/4
+                        time:   [141.52 µs 145.36 µs 150.71 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking process_table/allocate_pid/contended/8
+Benchmarking process_table/allocate_pid/contended/8: Warming up for 3.0000 s
+Benchmarking process_table/allocate_pid/contended/8: Collecting 100 samples in estimated 5.0927 s (20k iterations)
+Benchmarking process_table/allocate_pid/contended/8: Analyzing
+process_table/allocate_pid/contended/8
+                        time:   [248.42 µs 255.73 µs 265.78 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  8 (8.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking process_table/insert/100
+Benchmarking process_table/insert/100: Warming up for 3.0000 s
+Benchmarking process_table/insert/100: Collecting 100 samples in estimated 5.0102 s (116k iterations)
+Benchmarking process_table/insert/100: Analyzing
+process_table/insert/100
+                        time:   [43.233 µs 43.471 µs 43.734 µs]
+                        thrpt:  [2.2865 Melem/s 2.3004 Melem/s 2.3130 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+Benchmarking process_table/insert/1000
+Benchmarking process_table/insert/1000: Warming up for 3.0000 s
+Benchmarking process_table/insert/1000: Collecting 100 samples in estimated 5.0509 s (10k iterations)
+Benchmarking process_table/insert/1000: Analyzing
+process_table/insert/1000
+                        time:   [508.48 µs 514.32 µs 521.70 µs]
+                        thrpt:  [1.9168 Melem/s 1.9443 Melem/s 1.9666 Melem/s]
+Benchmarking process_table/insert/10000
+Benchmarking process_table/insert/10000: Warming up for 3.0000 s
+Benchmarking process_table/insert/10000: Collecting 100 samples in estimated 5.2430 s (300 iterations)
+Benchmarking process_table/insert/10000: Analyzing
+process_table/insert/10000
+                        time:   [17.094 ms 17.930 ms 18.759 ms]
+                        thrpt:  [533.07 Kelem/s 557.74 Kelem/s 585.02 Kelem/s]
+
+Benchmarking process_table/lookup/get/100
+Benchmarking process_table/lookup/get/100: Warming up for 3.0000 s
+Benchmarking process_table/lookup/get/100: Collecting 100 samples in estimated 5.0002 s (140M iterations)
+Benchmarking process_table/lookup/get/100: Analyzing
+process_table/lookup/get/100
+                        time:   [36.977 ns 37.710 ns 38.441 ns]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking process_table/lookup/get/1000
+Benchmarking process_table/lookup/get/1000: Warming up for 3.0000 s
+Benchmarking process_table/lookup/get/1000: Collecting 100 samples in estimated 5.0001 s (139M iterations)
+Benchmarking process_table/lookup/get/1000: Analyzing
+process_table/lookup/get/1000
+                        time:   [36.025 ns 36.281 ns 36.582 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+Benchmarking process_table/lookup/get/10000
+Benchmarking process_table/lookup/get/10000: Warming up for 3.0000 s
+Benchmarking process_table/lookup/get/10000: Collecting 100 samples in estimated 5.0001 s (136M iterations)
+Benchmarking process_table/lookup/get/10000: Analyzing
+process_table/lookup/get/10000
+                        time:   [37.614 ns 38.686 ns 39.757 ns]
+Found 14 outliers among 100 measurements (14.00%)
+  4 (4.00%) high mild
+  10 (10.00%) high severe
+
+Benchmarking process_table/send/send/100
+Benchmarking process_table/send/send/100: Warming up for 3.0000 s
+Benchmarking process_table/send/send/100: Collecting 100 samples in estimated 5.0003 s (44M iterations)
+Benchmarking process_table/send/send/100: Analyzing
+process_table/send/send/100
+                        time:   [112.55 ns 113.13 ns 113.86 ns]
+Found 15 outliers among 100 measurements (15.00%)
+  9 (9.00%) high mild
+  6 (6.00%) high severe
+Benchmarking process_table/send/send/1000
+Benchmarking process_table/send/send/1000: Warming up for 3.0000 s
+Benchmarking process_table/send/send/1000: Collecting 100 samples in estimated 5.0005 s (43M iterations)
+Benchmarking process_table/send/send/1000: Analyzing
+process_table/send/send/1000
+                        time:   [113.94 ns 114.42 ns 114.99 ns]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking process_table/concurrent_rw/2
+Benchmarking process_table/concurrent_rw/2: Warming up for 3.0000 s
+Benchmarking process_table/concurrent_rw/2: Collecting 100 samples in estimated 5.7584 s (30k iterations)
+Benchmarking process_table/concurrent_rw/2: Analyzing
+process_table/concurrent_rw/2
+                        time:   [188.86 µs 190.28 µs 191.88 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking process_table/concurrent_rw/4
+Benchmarking process_table/concurrent_rw/4: Warming up for 3.0000 s
+Benchmarking process_table/concurrent_rw/4: Collecting 100 samples in estimated 5.8193 s (20k iterations)
+Benchmarking process_table/concurrent_rw/4: Analyzing
+process_table/concurrent_rw/4
+                        time:   [281.61 µs 284.13 µs 287.42 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking process_table/concurrent_rw/8
+Benchmarking process_table/concurrent_rw/8: Warming up for 3.0000 s
+Benchmarking process_table/concurrent_rw/8: Collecting 100 samples in estimated 5.0978 s (10k iterations)
+Benchmarking process_table/concurrent_rw/8: Analyzing
+process_table/concurrent_rw/8
+                        time:   [488.12 µs 495.47 µs 506.23 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+
+     Running benches/supervisor.rs (target/release/deps/supervisor-d9fb9a122d8a08e6)
+Gnuplot not found, using plotters backend
+Benchmarking supervisor/startup/1
+Benchmarking supervisor/startup/1: Warming up for 3.0000 s
+Benchmarking supervisor/startup/1: Collecting 100 samples in estimated 5.6460 s (500 iterations)
+Benchmarking supervisor/startup/1: Analyzing
+supervisor/startup/1    time:   [11.319 ms 11.345 ms 11.372 ms]
+                        thrpt:  [87.938  elem/s 88.144  elem/s 88.349  elem/s]
+Benchmarking supervisor/startup/5
+Benchmarking supervisor/startup/5: Warming up for 3.0000 s
+Benchmarking supervisor/startup/5: Collecting 100 samples in estimated 5.6286 s (500 iterations)
+Benchmarking supervisor/startup/5: Analyzing
+supervisor/startup/5    time:   [11.214 ms 11.246 ms 11.279 ms]
+                        thrpt:  [443.32  elem/s 444.61  elem/s 445.87  elem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking supervisor/startup/10
+Benchmarking supervisor/startup/10: Warming up for 3.0000 s
+Benchmarking supervisor/startup/10: Collecting 100 samples in estimated 5.6073 s (500 iterations)
+Benchmarking supervisor/startup/10: Analyzing
+supervisor/startup/10   time:   [11.261 ms 11.295 ms 11.330 ms]
+                        thrpt:  [882.65  elem/s 885.38  elem/s 888.02  elem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking supervisor/startup/50
+Benchmarking supervisor/startup/50: Warming up for 3.0000 s
+Benchmarking supervisor/startup/50: Collecting 100 samples in estimated 5.5982 s (500 iterations)
+Benchmarking supervisor/startup/50: Analyzing
+supervisor/startup/50   time:   [11.222 ms 11.257 ms 11.293 ms]
+                        thrpt:  [4.4274 Kelem/s 4.4416 Kelem/s 4.4555 Kelem/s]
+
+Benchmarking supervisor/add_child/1
+Benchmarking supervisor/add_child/1: Warming up for 3.0000 s
+Benchmarking supervisor/add_child/1: Collecting 100 samples in estimated 5.7169 s (500 iterations)
+Benchmarking supervisor/add_child/1: Analyzing
+supervisor/add_child/1  time:   [11.396 ms 11.426 ms 11.457 ms]
+                        thrpt:  [87.286  elem/s 87.516  elem/s 87.747  elem/s]
+Benchmarking supervisor/add_child/10
+Benchmarking supervisor/add_child/10: Warming up for 3.0000 s
+Benchmarking supervisor/add_child/10: Collecting 100 samples in estimated 5.7653 s (500 iterations)
+Benchmarking supervisor/add_child/10: Analyzing
+supervisor/add_child/10 time:   [11.400 ms 11.433 ms 11.467 ms]
+                        thrpt:  [872.05  elem/s 874.66  elem/s 877.23  elem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking supervisor/add_child/50
+Benchmarking supervisor/add_child/50: Warming up for 3.0000 s
+Benchmarking supervisor/add_child/50: Collecting 100 samples in estimated 5.1485 s (400 iterations)
+Benchmarking supervisor/add_child/50: Analyzing
+supervisor/add_child/50 time:   [12.707 ms 12.747 ms 12.788 ms]
+                        thrpt:  [3.9100 Kelem/s 3.9225 Kelem/s 3.9347 Kelem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking supervisor/restart_one_for_one
+Benchmarking supervisor/restart_one_for_one: Warming up for 3.0000 s
+Benchmarking supervisor/restart_one_for_one: Collecting 100 samples in estimated 5.7384 s (500 iterations)
+Benchmarking supervisor/restart_one_for_one: Analyzing
+supervisor/restart_one_for_one
+                        time:   [11.317 ms 11.364 ms 11.411 ms]
+
