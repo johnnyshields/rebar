@@ -1,4 +1,3 @@
-pub use rebar_core::router::{LocalRouter, MessageRouter};
 pub use rebar_core::*;
 
 use std::rc::Rc;
@@ -6,8 +5,8 @@ use std::rc::Rc;
 use rebar_core::channel::mpsc::unbounded as local_mpsc;
 
 use rebar_cluster::connection::{ConnectionManager, TransportConnector};
-use rebar_cluster::protocol::Frame;
-use rebar_cluster::router::{DistributedRouter, FrameError, RouterCommand, deliver_inbound_frame};
+use rebar_cluster::protocol::{Frame, FrameError};
+use rebar_cluster::router::{DistributedRouter, RouterCommand, deliver_inbound_frame};
 use rebar_core::process::table::ProcessTable;
 use rebar_core::runtime::Runtime;
 

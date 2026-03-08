@@ -13,6 +13,26 @@ use crate::process::table::{ProcessHandle, ProcessTable};
 use crate::process::{Message, ProcessId, RegistryError, SendError};
 use crate::router::{LocalRouter, MessageRouter};
 
+/// Error returned by [`Runtime::send_named`].
+#[derive(Debug, thiserror::Error)]
+pub enum SendNamedError {
+    /// The given name is not registered.
+    #[error("name not found: {0}")]
+    NameNotFound(String),
+    /// The underlying send failed.
+    #[error(transparent)]
+    Send(#[from] SendError),
+}
+
+impl From<RegistryError> for SendNamedError {
+    fn from(e: RegistryError) -> Self {
+        match e {
+            RegistryError::NameNotFound(name) => SendNamedError::NameNotFound(name),
+            other => SendNamedError::NameNotFound(other.to_string()),
+        }
+    }
+}
+
 /// Shared shutdown state with waker support for zero-latency cancellation.
 struct ShutdownState {
     flag: Cell<bool>,
@@ -274,11 +294,11 @@ impl Runtime {
     }
 
     /// Send a message to a named process.
-    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendNamedError> {
         let pid = self
             .table
             .whereis(name)
-            .ok_or_else(|| RegistryError::NameNotFound(name.to_owned()))?;
+            .ok_or_else(|| SendNamedError::NameNotFound(name.to_owned()))?;
         let from = ProcessId::new(self.node_id, 0, 0);
         Ok(self.router.route(from, pid, payload)?)
     }

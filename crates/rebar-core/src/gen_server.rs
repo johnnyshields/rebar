@@ -54,14 +54,7 @@ impl GenServerContext {
     }
 
     pub fn cast(&self, dest: ProcessId, request: rmpv::Value) -> Result<(), SendError> {
-        let envelope = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("$gs".into()),
-                rmpv::Value::String("cast".into()),
-            ),
-            (rmpv::Value::String("req".into()), request),
-        ]);
-        self.router.route(self.pid, dest, envelope)
+        self.router.route(self.pid, dest, cast_envelope(request))
     }
 
     pub fn send_info(&self, dest: ProcessId, msg: rmpv::Value) -> Result<(), SendError> {
@@ -69,18 +62,8 @@ impl GenServerContext {
     }
 
     pub fn reply(&self, from: &From, response: rmpv::Value) -> Result<(), SendError> {
-        let envelope = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("$gs".into()),
-                rmpv::Value::String("reply".into()),
-            ),
-            (
-                rmpv::Value::String("ref".into()),
-                rmpv::Value::Integer(from.ref_id.into()),
-            ),
-            (rmpv::Value::String("val".into()), response),
-        ]);
-        self.router.route(self.pid, from.pid, envelope)
+        self.router
+            .route(self.pid, from.pid, reply_envelope(from.ref_id, response))
     }
 }
 
@@ -162,6 +145,44 @@ fn extract_field(value: &rmpv::Value, field: &str) -> Option<rmpv::Value> {
     None
 }
 
+fn call_envelope(ref_id: u64, request: rmpv::Value) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::String("$gs".into()),
+            rmpv::Value::String("call".into()),
+        ),
+        (
+            rmpv::Value::String("ref".into()),
+            rmpv::Value::Integer(ref_id.into()),
+        ),
+        (rmpv::Value::String("req".into()), request),
+    ])
+}
+
+fn cast_envelope(request: rmpv::Value) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::String("$gs".into()),
+            rmpv::Value::String("cast".into()),
+        ),
+        (rmpv::Value::String("req".into()), request),
+    ])
+}
+
+fn reply_envelope(ref_id: u64, response: rmpv::Value) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::String("$gs".into()),
+            rmpv::Value::String("reply".into()),
+        ),
+        (
+            rmpv::Value::String("ref".into()),
+            rmpv::Value::Integer(ref_id.into()),
+        ),
+        (rmpv::Value::String("val".into()), response),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // Process loop
 // ---------------------------------------------------------------------------
@@ -187,11 +208,18 @@ async fn gen_server_loop<S: GenServer>(
                 let ref_id = extract_field(&payload, "ref")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let raw_request = extract_field(&payload, "req").unwrap_or(rmpv::Value::Nil);
                 let from = From {
                     pid: msg.from(),
                     ref_id,
                 };
+                if ref_id == 0 {
+                    let _ = ctx.reply(
+                        &from,
+                        rmpv::Value::String("bad_call: missing ref_id".into()),
+                    );
+                    continue;
+                }
+                let raw_request = extract_field(&payload, "req").unwrap_or(rmpv::Value::Nil);
 
                 let call_msg = match S::Call::try_from(raw_request) {
                     Ok(m) => m,
@@ -236,15 +264,7 @@ async fn gen_server_loop<S: GenServer>(
                     }
                 }
             }
-            Some("reply") => {
-                match server.handle_info(payload, state, &ctx).await {
-                    InfoReply::NoReply(new_state) => state = new_state,
-                    InfoReply::Stop(reason, final_state) => {
-                        server.terminate(&reason, final_state).await;
-                        return ExitReason::Normal;
-                    }
-                }
-            }
+            Some("reply") => continue,
             _ => {
                 match server.handle_info(payload, state, &ctx).await {
                     InfoReply::NoReply(new_state) => state = new_state,
@@ -283,6 +303,24 @@ impl std::fmt::Display for CallError {
 impl std::error::Error for CallError {}
 
 // ---------------------------------------------------------------------------
+// TempPidGuard (RAII cleanup for temporary call mailboxes)
+// ---------------------------------------------------------------------------
+
+struct TempPidGuard<'a> {
+    table: &'a ProcessTable,
+    pid: ProcessId,
+    defused: bool,
+}
+
+impl Drop for TempPidGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.table.remove(&self.pid);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GenServerRef
 // ---------------------------------------------------------------------------
 
@@ -305,16 +343,9 @@ impl<S: GenServer> GenServerRef<S> {
 
     /// Send a typed cast (fire-and-forget) to the GenServer.
     pub fn cast(&self, msg: S::Cast) -> Result<(), SendError> {
-        let envelope = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("$gs".into()),
-                rmpv::Value::String("cast".into()),
-            ),
-            (rmpv::Value::String("req".into()), msg.into()),
-        ]);
         // Use a synthetic sender PID (node 0, thread 0, local 0)
         let from = ProcessId::new(0, 0, 0);
-        self.router.route(from, self.pid, envelope)
+        self.router.route(from, self.pid, cast_envelope(msg.into()))
     }
 
     /// Send a typed call and wait for a typed reply.
@@ -332,22 +363,17 @@ impl<S: GenServer> GenServerRef<S> {
         let temp_pid = self.table.allocate_pid();
         let (tx, mut rx) = Mailbox::unbounded();
         self.table.insert(temp_pid, ProcessHandle::new(tx));
+        let mut guard = TempPidGuard {
+            table: &self.table,
+            pid: temp_pid,
+            defused: false,
+        };
 
-        // Build and send the call envelope
-        let envelope = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("$gs".into()),
-                rmpv::Value::String("call".into()),
-            ),
-            (
-                rmpv::Value::String("ref".into()),
-                rmpv::Value::Integer(ref_id.into()),
-            ),
-            (rmpv::Value::String("req".into()), msg.into()),
-        ]);
-
-        if self.router.route(temp_pid, self.pid, envelope).is_err() {
-            self.table.remove(&temp_pid);
+        if self
+            .router
+            .route(temp_pid, self.pid, call_envelope(ref_id, msg.into()))
+            .is_err()
+        {
             return Err(CallError::ServerDead);
         }
 
@@ -368,7 +394,8 @@ impl<S: GenServer> GenServerRef<S> {
         })
         .await;
 
-        // Clean up temp process
+        // Defuse guard so drop doesn't double-remove
+        guard.defused = true;
         self.table.remove(&temp_pid);
 
         match result {
@@ -439,18 +466,7 @@ pub async fn call_from_runtime(
     let (tx, rx) = crate::channel::oneshot::channel();
 
     runtime.spawn(move |mut ctx| async move {
-        let envelope = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("$gs".into()),
-                rmpv::Value::String("call".into()),
-            ),
-            (
-                rmpv::Value::String("ref".into()),
-                rmpv::Value::Integer(ref_id.into()),
-            ),
-            (rmpv::Value::String("req".into()), request),
-        ]);
-        if ctx.send(dest, envelope).is_err() {
+        if ctx.send(dest, call_envelope(ref_id, request)).is_err() {
             let _ = tx.send(Err(CallError::ServerDead));
             return;
         }
@@ -486,14 +502,7 @@ pub fn cast_from_runtime(
     dest: ProcessId,
     request: rmpv::Value,
 ) -> Result<(), SendError> {
-    let envelope = rmpv::Value::Map(vec![
-        (
-            rmpv::Value::String("$gs".into()),
-            rmpv::Value::String("cast".into()),
-        ),
-        (rmpv::Value::String("req".into()), request),
-    ]);
-    runtime.send(dest, envelope)
+    runtime.send(dest, cast_envelope(request))
 }
 
 /// Reply to a From (for deferred replies outside the GenServer callbacks).
@@ -502,18 +511,7 @@ pub fn reply_from_runtime(
     from: &From,
     response: rmpv::Value,
 ) -> Result<(), SendError> {
-    let envelope = rmpv::Value::Map(vec![
-        (
-            rmpv::Value::String("$gs".into()),
-            rmpv::Value::String("reply".into()),
-        ),
-        (
-            rmpv::Value::String("ref".into()),
-            rmpv::Value::Integer(from.ref_id.into()),
-        ),
-        (rmpv::Value::String("val".into()), response),
-    ]);
-    runtime.send(from.pid, envelope)
+    runtime.send(from.pid, reply_envelope(from.ref_id, response))
 }
 
 /// Create a ChildEntry for supervision.
@@ -1160,7 +1158,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(reply.as_u64().unwrap(), 1);
+        assert_eq!(reply.as_u64().unwrap(), 0);
         });
     }
 

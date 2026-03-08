@@ -252,3 +252,88 @@ fn panicked_child_restarted() {
         handle.shutdown();
     });
 }
+
+#[test]
+fn remove_child_happy_path() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+        let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
+
+        // Use a Temporary child that exits normally — it won't restart,
+        // so it ends up in the terminated list (eligible for remove_child).
+        let entry = ChildEntry::new(
+            ChildSpec::new("removable").restart(RestartType::Temporary),
+            || async {
+                ExitReason::Normal
+            },
+        );
+        let pid = handle.start_child(entry).await.unwrap();
+
+        // Wait for the child to exit and be recorded as terminated
+        sleep(Duration::from_millis(100)).await;
+
+        let counts = handle.count_children().await.unwrap();
+        assert_eq!(counts.active, 0);
+        assert_eq!(counts.specs, 1); // spec still tracked
+
+        // Remove the terminated child spec
+        handle.remove_child(pid).await.unwrap();
+
+        let counts = handle.count_children().await.unwrap();
+        assert_eq!(counts.active, 0);
+        assert_eq!(counts.specs, 0);
+
+        handle.shutdown();
+    });
+}
+
+#[test]
+fn which_children_after_restart() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+        let spec = DynamicSupervisorSpec::new()
+            .max_restarts(5)
+            .max_seconds(10);
+        let handle = start_dynamic_supervisor(&rt, spec);
+
+        let crash_once = Arc::new(AtomicU32::new(0));
+        let crash_once_clone = Arc::clone(&crash_once);
+
+        let entry = ChildEntry::new(
+            ChildSpec::new("crasher").restart(RestartType::Permanent),
+            move || {
+                let c = Arc::clone(&crash_once_clone);
+                async move {
+                    let count = c.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        // First run: crash
+                        ExitReason::Abnormal("crash once".into())
+                    } else {
+                        // Second run: stay alive
+                        sleep(Duration::from_secs(60)).await;
+                        ExitReason::Normal
+                    }
+                }
+            },
+        );
+
+        let original_pid = handle.start_child(entry).await.unwrap();
+
+        // Wait for the crash and restart
+        sleep(Duration::from_millis(300)).await;
+
+        assert!(crash_once.load(Ordering::SeqCst) >= 2, "expected at least 2 starts");
+
+        let children = handle.which_children().await.unwrap();
+        assert_eq!(children.len(), 1);
+        let new_pid = children[0].pid;
+        assert!(new_pid.is_some(), "restarted child should be running");
+        assert_ne!(
+            new_pid.unwrap(),
+            original_pid,
+            "PID should change after restart"
+        );
+
+        handle.shutdown();
+    });
+}

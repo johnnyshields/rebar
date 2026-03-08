@@ -61,8 +61,6 @@ struct DynChildState {
 
 struct TerminatedChildSpec {
     spec: ChildSpec,
-    #[allow(dead_code)] // retained for potential future restart-from-terminated
-    factory: ChildFactory,
     original_pid: ProcessId,
 }
 
@@ -213,7 +211,6 @@ async fn dynamic_supervisor_loop(
                 if !child.spec.restart.should_restart(&reason) {
                     terminated.push(TerminatedChildSpec {
                         spec: child.spec,
-                        factory: child.factory,
                         original_pid: pid,
                     });
                     continue;

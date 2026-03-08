@@ -1,7 +1,8 @@
+use rebar_core::process::SendError;
 use thiserror::Error;
 
 /// Errors that can occur during frame encoding/decoding.
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum FrameError {
     #[error("invalid message type: {0}")]
     InvalidMsgType(u8),
@@ -11,6 +12,10 @@ pub enum FrameError {
     MsgpackDecode(String),
     #[error("msgpack encode error: {0}")]
     MsgpackEncode(String),
+    #[error("malformed frame: {0}")]
+    MalformedFrame(&'static str),
+    #[error(transparent)]
+    Send(#[from] SendError),
 }
 
 /// Wire protocol message types.

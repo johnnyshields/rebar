@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use rebar_core::channel::mpsc::unbounded::Tx;
 
-use crate::protocol::{Frame, MsgType};
+use crate::protocol::{Frame, FrameError, MsgType};
 use rebar_core::process::table::ProcessTable;
 use rebar_core::process::{Message, ProcessId, SendError};
 use rebar_core::router::MessageRouter;
@@ -81,15 +81,6 @@ pub fn encode_send_frame(from: ProcessId, to: ProcessId, payload: rmpv::Value) -
         ]),
         payload,
     }
-}
-
-/// Errors from inbound frame parsing and delivery.
-#[derive(Debug, PartialEq, thiserror::Error)]
-pub enum FrameError {
-    #[error("malformed frame: {0}")]
-    MalformedFrame(&'static str),
-    #[error(transparent)]
-    Send(#[from] SendError),
 }
 
 /// Extract a u64 value from a msgpack Value, returning a FrameError if it is not a u64.

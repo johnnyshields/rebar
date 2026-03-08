@@ -6,7 +6,7 @@ use std::convert::From as StdFrom;
 
 use rebar_core::executor::{ExecutorConfig, RebarExecutor};
 use rebar_core::gen_server::{
-    self, spawn_gen_server, CallReply, CastReply, GenServer, GenServerContext, InfoReply,
+    self, spawn_gen_server, CallError, CallReply, CastReply, GenServer, GenServerContext, InfoReply,
 };
 use rebar_core::gen_server::From as GsFrom;
 use rebar_core::runtime::Runtime;
@@ -17,7 +17,57 @@ fn test_executor() -> RebarExecutor {
 }
 
 // ---------------------------------------------------------------------------
-// Counter message types with Into/TryFrom rmpv::Value
+// gen_server_codec! macro — generates From<T> for rmpv::Value and
+// TryFrom<rmpv::Value> for T for string-keyed enums.
+// ---------------------------------------------------------------------------
+
+macro_rules! gen_server_codec {
+    // Simple string variants: Variant => "string"
+    ($name:ident { $($variant:ident => $tag:literal),+ $(,)? }) => {
+        impl StdFrom<$name> for rmpv::Value {
+            fn from(v: $name) -> rmpv::Value {
+                match v {
+                    $($name::$variant => rmpv::Value::String($tag.into()),)+
+                }
+            }
+        }
+
+        impl TryFrom<rmpv::Value> for $name {
+            type Error = ();
+            fn try_from(v: rmpv::Value) -> Result<Self, ()> {
+                match v.as_str() {
+                    $(Some($tag) => Ok($name::$variant),)+
+                    _ => Err(()),
+                }
+            }
+        }
+    };
+    // Value-carrying variant: Variant(Type) => integer
+    ($name:ident { $($variant:ident ( $inner:ty ) => integer),+ $(,)? }) => {
+        impl StdFrom<$name> for rmpv::Value {
+            fn from(v: $name) -> rmpv::Value {
+                match v {
+                    $($name::$variant(n) => rmpv::Value::Integer(n.into()),)+
+                }
+            }
+        }
+
+        impl TryFrom<rmpv::Value> for $name {
+            type Error = ();
+            fn try_from(v: rmpv::Value) -> Result<Self, ()> {
+                $(
+                    if let Some(n) = v.as_u64() {
+                        return Ok($name::$variant(n as $inner));
+                    }
+                )+
+                Err(())
+            }
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Counter message types with gen_server_codec! macro
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -25,75 +75,20 @@ enum CounterCall {
     Get,
     IncrementAndGet,
 }
-
-impl StdFrom<CounterCall> for rmpv::Value {
-    fn from(c: CounterCall) -> rmpv::Value {
-        match c {
-            CounterCall::Get => rmpv::Value::String("get".into()),
-            CounterCall::IncrementAndGet => rmpv::Value::String("increment_and_get".into()),
-        }
-    }
-}
-
-impl TryFrom<rmpv::Value> for CounterCall {
-    type Error = ();
-    fn try_from(v: rmpv::Value) -> Result<Self, ()> {
-        match v.as_str() {
-            Some("get") => Ok(CounterCall::Get),
-            Some("increment_and_get") => Ok(CounterCall::IncrementAndGet),
-            _ => Err(()),
-        }
-    }
-}
+gen_server_codec!(CounterCall { Get => "get", IncrementAndGet => "increment_and_get" });
 
 #[derive(Debug)]
 enum CounterCast {
     Increment,
     Reset,
 }
-
-impl StdFrom<CounterCast> for rmpv::Value {
-    fn from(c: CounterCast) -> rmpv::Value {
-        match c {
-            CounterCast::Increment => rmpv::Value::String("increment".into()),
-            CounterCast::Reset => rmpv::Value::String("reset".into()),
-        }
-    }
-}
-
-impl TryFrom<rmpv::Value> for CounterCast {
-    type Error = ();
-    fn try_from(v: rmpv::Value) -> Result<Self, ()> {
-        match v.as_str() {
-            Some("increment") => Ok(CounterCast::Increment),
-            Some("reset") => Ok(CounterCast::Reset),
-            _ => Err(()),
-        }
-    }
-}
+gen_server_codec!(CounterCast { Increment => "increment", Reset => "reset" });
 
 #[derive(Debug, PartialEq)]
 enum CounterReply {
     Count(u64),
 }
-
-impl StdFrom<CounterReply> for rmpv::Value {
-    fn from(r: CounterReply) -> rmpv::Value {
-        match r {
-            CounterReply::Count(n) => rmpv::Value::Integer(n.into()),
-        }
-    }
-}
-
-impl TryFrom<rmpv::Value> for CounterReply {
-    type Error = ();
-    fn try_from(v: rmpv::Value) -> Result<Self, ()> {
-        if let Some(n) = v.as_u64() {
-            return Ok(CounterReply::Count(n));
-        }
-        Err(())
-    }
-}
+gen_server_codec!(CounterReply { Count(u64) => integer });
 
 // ---------------------------------------------------------------------------
 // Counter GenServer
@@ -150,6 +145,23 @@ impl GenServer for Counter {
             return InfoReply::NoReply(state + val);
         }
         InfoReply::NoReply(state)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Never type for servers that don't use call/cast/reply
+// ---------------------------------------------------------------------------
+
+enum Never {}
+impl StdFrom<Never> for rmpv::Value {
+    fn from(n: Never) -> rmpv::Value {
+        match n {}
+    }
+}
+impl TryFrom<rmpv::Value> for Never {
+    type Error = ();
+    fn try_from(_: rmpv::Value) -> Result<Self, ()> {
+        Err(())
     }
 }
 
@@ -278,20 +290,6 @@ fn gen_server_ref_clone_works() {
 // Init failure test
 // ---------------------------------------------------------------------------
 
-// Never type for servers that don't use call/cast/reply
-enum Never {}
-impl StdFrom<Never> for rmpv::Value {
-    fn from(n: Never) -> rmpv::Value {
-        match n {}
-    }
-}
-impl TryFrom<rmpv::Value> for Never {
-    type Error = ();
-    fn try_from(_: rmpv::Value) -> Result<Self, ()> {
-        Err(())
-    }
-}
-
 struct FailInit;
 
 impl GenServer for FailInit {
@@ -350,24 +348,7 @@ fn gen_server_init_failure() {
 enum DeferredCall {
     Deferred,
 }
-
-impl StdFrom<DeferredCall> for rmpv::Value {
-    fn from(c: DeferredCall) -> rmpv::Value {
-        match c {
-            DeferredCall::Deferred => rmpv::Value::String("deferred".into()),
-        }
-    }
-}
-
-impl TryFrom<rmpv::Value> for DeferredCall {
-    type Error = ();
-    fn try_from(v: rmpv::Value) -> Result<Self, ()> {
-        match v.as_str() {
-            Some("deferred") => Ok(DeferredCall::Deferred),
-            _ => Err(()),
-        }
-    }
-}
+gen_server_codec!(DeferredCall { Deferred => "deferred" });
 
 struct DeferredServer;
 
@@ -512,5 +493,102 @@ fn child_entry_supervision() {
         let entry = child_entry(Rc::clone(&rt_rc), SupervisedCounter, spec);
         // The child_entry should have the correct id
         assert_eq!(entry.spec.id, "counter");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Cast-only server test: GenServer with type Call = Never, only uses cast
+// ---------------------------------------------------------------------------
+
+struct CastOnlyServer;
+
+#[derive(Debug)]
+enum CastOnlyMsg {
+    Ping,
+}
+gen_server_codec!(CastOnlyMsg { Ping => "ping" });
+
+impl GenServer for CastOnlyServer {
+    type State = u64;
+    type Call = Never;
+    type Cast = CastOnlyMsg;
+    type Reply = Never;
+
+    async fn init(&self, _ctx: &GenServerContext) -> Result<u64, String> {
+        Ok(0)
+    }
+
+    async fn handle_call(
+        &self,
+        msg: Never,
+        _from: GsFrom,
+        _state: u64,
+        _ctx: &GenServerContext,
+    ) -> CallReply<u64> {
+        match msg {}
+    }
+
+    async fn handle_cast(
+        &self,
+        _msg: CastOnlyMsg,
+        state: u64,
+        _ctx: &GenServerContext,
+    ) -> CastReply<u64> {
+        CastReply::NoReply(state + 1)
+    }
+}
+
+#[test]
+fn cast_only_server() {
+    let ex = test_executor();
+    ex.block_on(async {
+        let rt = Runtime::new(1);
+        let pid = gen_server::start(&rt, CastOnlyServer);
+
+        // Cast should work
+        gen_server::cast_from_runtime(&rt, pid, rmpv::Value::String("ping".into())).unwrap();
+        sleep(Duration::from_millis(50)).await;
+
+        // Call should fail because Never can't be decoded
+        let result = gen_server::call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("anything".into()),
+            Duration::from_millis(200),
+        )
+        .await;
+        // The call gets a reply (bad_call: could not decode message), not a timeout
+        assert!(result.is_ok());
+        let reply = result.unwrap();
+        assert!(reply.as_str().unwrap().contains("bad_call"));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Dead server call test: call a dead server, verify error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dead_server_call() {
+    let ex = test_executor();
+    ex.block_on(async {
+        let rt = Runtime::new(1);
+        let pid = gen_server::start(&rt, FailInit);
+        // Wait for init failure to kill the server
+        sleep(Duration::from_millis(50)).await;
+        assert!(!rt.is_alive(pid));
+
+        let result = gen_server::call_from_runtime(
+            &rt,
+            pid,
+            rmpv::Value::String("get".into()),
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CallError::Timeout) | Err(CallError::ServerDead)),
+            "expected Timeout or ServerDead, got {:?}",
+            result
+        );
     });
 }

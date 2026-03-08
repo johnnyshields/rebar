@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rebar_ffi::{
     rebar_msg_create, rebar_msg_data, rebar_msg_free, rebar_msg_len, rebar_register,
-    rebar_runtime_free, rebar_runtime_new, rebar_spawn, rebar_whereis, RebarPid,
+    rebar_runtime_free, rebar_runtime_new, rebar_send, rebar_send_named, rebar_spawn,
+    rebar_whereis, RebarPid,
 };
 
 const REBAR_OK: i32 = 0;
@@ -126,6 +127,138 @@ fn registry_works_after_normal_usage() {
     assert_eq!(
         found_pid.local_id, registered_pid.local_id,
         "looked-up local_id must match registered value"
+    );
+
+    rebar_runtime_free(rt);
+}
+
+/// Contract: rebar_send to a spawned process exercises the send path
+/// without panicking. The process may have exited by the time we send,
+/// so both REBAR_OK and REBAR_ERR_SEND_FAILED are acceptable.
+#[test]
+fn send_to_spawned_process() {
+    static CALLBACK_RAN: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn callback(_pid: RebarPid) {
+        CALLBACK_RAN.store(true, Ordering::SeqCst);
+    }
+
+    CALLBACK_RAN.store(false, Ordering::SeqCst);
+
+    let rt = rebar_runtime_new(1);
+    assert!(!rt.is_null());
+
+    let mut pid_out = RebarPid {
+        node_id: 0,
+        thread_id: 0,
+        local_id: 0,
+    };
+    let rc = rebar_spawn(rt, Some(callback), &mut pid_out);
+    assert_eq!(rc, REBAR_OK);
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(CALLBACK_RAN.load(Ordering::SeqCst));
+
+    let data = b"hello";
+    let msg = rebar_msg_create(data.as_ptr(), data.len());
+    let rc = rebar_send(rt, pid_out, msg);
+    assert!(
+        rc == REBAR_OK || rc == -2,
+        "rebar_send must return OK or SEND_FAILED, got {rc}"
+    );
+    rebar_msg_free(msg);
+
+    rebar_runtime_free(rt);
+}
+
+/// Contract: rebar_send_named exercises the named send path without
+/// panicking. The process may have exited, so both OK and SEND_FAILED
+/// are acceptable.
+#[test]
+fn send_named_to_spawned_process() {
+    extern "C" fn callback(_pid: RebarPid) {}
+
+    let rt = rebar_runtime_new(1);
+    assert!(!rt.is_null());
+
+    let mut pid_out = RebarPid {
+        node_id: 0,
+        thread_id: 0,
+        local_id: 0,
+    };
+    let rc = rebar_spawn(rt, Some(callback), &mut pid_out);
+    assert_eq!(rc, REBAR_OK);
+
+    let name = b"named_worker";
+    let rc = rebar_register(rt, name.as_ptr(), name.len(), pid_out);
+    assert_eq!(rc, REBAR_OK);
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let data = b"payload";
+    let msg = rebar_msg_create(data.as_ptr(), data.len());
+    let rc = rebar_send_named(rt, name.as_ptr(), name.len(), msg);
+    assert!(
+        rc == REBAR_OK || rc == -2,
+        "rebar_send_named must return OK or SEND_FAILED, got {rc}"
+    );
+    rebar_msg_free(msg);
+
+    rebar_runtime_free(rt);
+}
+
+/// Contract: rebar_whereis for an unregistered name returns error (not REBAR_OK).
+#[test]
+fn whereis_not_found() {
+    let rt = rebar_runtime_new(1);
+    assert!(!rt.is_null());
+
+    let name = b"nonexistent_name";
+    let mut pid_out = RebarPid {
+        node_id: 0,
+        thread_id: 0,
+        local_id: 0,
+    };
+    let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut pid_out);
+    assert_ne!(rc, REBAR_OK, "whereis for unregistered name must not return OK");
+
+    rebar_runtime_free(rt);
+}
+
+/// Contract: registering the same name twice overwrites the previous entry.
+#[test]
+fn registry_duplicate_name_overwrites() {
+    let rt = rebar_runtime_new(1);
+    assert!(!rt.is_null());
+
+    let name = b"dup_name";
+    let pid1 = RebarPid {
+        node_id: 1,
+        thread_id: 0,
+        local_id: 100,
+    };
+    let pid2 = RebarPid {
+        node_id: 1,
+        thread_id: 0,
+        local_id: 200,
+    };
+
+    let rc = rebar_register(rt, name.as_ptr(), name.len(), pid1);
+    assert_eq!(rc, REBAR_OK);
+
+    let rc = rebar_register(rt, name.as_ptr(), name.len(), pid2);
+    assert_eq!(rc, REBAR_OK, "second register must succeed (overwrite)");
+
+    let mut found = RebarPid {
+        node_id: 0,
+        thread_id: 0,
+        local_id: 0,
+    };
+    let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found);
+    assert_eq!(rc, REBAR_OK);
+    assert_eq!(
+        found.local_id, 200,
+        "whereis must return the second (overwritten) PID"
     );
 
     rebar_runtime_free(rt);
