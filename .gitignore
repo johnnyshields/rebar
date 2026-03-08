@@ -1,3 +1,4 @@
 /target
 bench/flamegraphs/
 .worktrees/
+.claude/worktrees/
