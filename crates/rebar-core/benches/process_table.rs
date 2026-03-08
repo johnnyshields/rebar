@@ -121,7 +121,7 @@ fn bench_send(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let pid = pids[idx % pids.len()];
-                    let msg = Message::new(from, rmpv::Value::Nil);
+                    let msg = Message::new_internal(from, rmpv::Value::Nil);
                     let _ = table.send(pid, msg);
                     idx += 1;
                 });
