@@ -113,16 +113,23 @@ impl Runtime {
 
         let table = Arc::clone(&self.table);
 
-        // Spawn a wrapper task that catches panics via the JoinHandle.
-        // tokio::spawn catches panics in the spawned task and returns
-        // JoinError instead of propagating them, so we spawn the handler
-        // inside an inner task and await its JoinHandle.
+        // Single spawn with drop guard for panic-safe cleanup.
+        // The guard removes the process from the table when dropped,
+        // which happens on both normal completion and panic unwind.
+        // This replaces the previous double-spawn pattern, saving one
+        // task allocation and one scheduler round-trip per spawn.
         tokio::spawn(async move {
-            let inner = tokio::spawn(handler(ctx));
-            // Whether the handler completes normally or panics,
-            // we always clean up by removing from the process table.
-            let _ = inner.await;
-            table.remove(&pid);
+            struct CleanupGuard {
+                table: Arc<ProcessTable>,
+                pid: ProcessId,
+            }
+            impl Drop for CleanupGuard {
+                fn drop(&mut self) {
+                    self.table.remove(&self.pid);
+                }
+            }
+            let _guard = CleanupGuard { table, pid };
+            handler(ctx).await;
         });
 
         pid
@@ -410,6 +417,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn spawn_cleanup_after_normal_exit() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|_ctx| async {}).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(rt.table().get(&pid).is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_cleanup_after_panic() {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|_ctx| async { panic!("test panic") }).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(rt.table().get(&pid).is_none());
     }
 
     #[tokio::test]
