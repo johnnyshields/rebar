@@ -1,7 +1,10 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::process::table::ProcessTable;
 use crate::process::{Message, ProcessId, SendError};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// Trait for routing messages between processes.
 /// Implementations decide whether to deliver locally or over the network.
@@ -26,14 +29,36 @@ impl LocalRouter {
 }
 
 impl MessageRouter for LocalRouter {
+    #[cfg_attr(feature = "tracing", instrument(level = "trace", skip(self, payload)))]
     fn route(
         &self,
         from: ProcessId,
         to: ProcessId,
         payload: rmpv::Value,
     ) -> Result<(), SendError> {
-        let msg = Message::new(from, payload);
+        let msg = Message::new_internal(from, payload);
         self.table.send(to, msg)
+    }
+}
+
+/// Router that's either a concrete LocalRouter (fast path) or a dynamic trait object.
+/// Using an enum avoids vtable dispatch on the common local-routing path.
+pub enum RouterKind {
+    Local(LocalRouter),
+    Custom(Arc<dyn MessageRouter>),
+}
+
+impl MessageRouter for RouterKind {
+    fn route(
+        &self,
+        from: ProcessId,
+        to: ProcessId,
+        payload: rmpv::Value,
+    ) -> Result<(), SendError> {
+        match self {
+            RouterKind::Local(r) => r.route(from, to, payload),
+            RouterKind::Custom(r) => r.route(from, to, payload),
+        }
     }
 }
 

@@ -71,6 +71,10 @@ enum SupervisorMsg {
         entry: ChildEntry,
         reply: oneshot::Sender<Result<ProcessId, SupervisorError>>,
     },
+    AddChildren {
+        entries: Vec<ChildEntry>,
+        reply: oneshot::Sender<Vec<Result<ProcessId, String>>>,
+    },
     Shutdown,
     TerminateChild {
         id: String,
@@ -112,6 +116,26 @@ impl SupervisorHandle {
             })
             .map_err(|_| SupervisorError::Gone)?;
         reply_rx.await.map_err(|_| SupervisorError::Gone)?
+    }
+
+    pub async fn add_children(
+        &self,
+        entries: Vec<ChildEntry>,
+    ) -> Vec<Result<ProcessId, String>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .msg_tx
+            .send(SupervisorMsg::AddChildren {
+                entries,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return vec![Err("supervisor gone".to_string())];
+        }
+        reply_rx
+            .await
+            .unwrap_or_else(|_| vec![Err("supervisor gone".to_string())])
     }
 
     pub fn shutdown(&self) {
@@ -315,6 +339,25 @@ async fn supervisor_loop(
                 let pid = child_state.pid.unwrap();
                 state.children.push(child_state);
                 let _ = reply.send(Ok(pid));
+            }
+            Some(SupervisorMsg::AddChildren { entries, reply }) => {
+                let mut results = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let child_id = entry.spec.id.clone();
+                    let mut child_state = ChildState {
+                        spec: entry.spec,
+                        factory: entry.factory,
+                        pid: None,
+                        shutdown_tx: None,
+                        join_handle: None,
+                        manually_stopped: false,
+                    };
+                    start_child(&mut child_state, &child_id, &msg_tx);
+                    let pid = child_state.pid.unwrap();
+                    state.children.push(child_state);
+                    results.push(Ok(pid));
+                }
+                let _ = reply.send(results);
             }
             Some(SupervisorMsg::TerminateChild { id, reply }) => {
                 match state.children.iter().position(|c| c.spec.id == id) {
@@ -701,6 +744,46 @@ mod tests {
             assert_eq!(sc.load(Ordering::SeqCst), 2);
             handle.shutdown();
             sleep(Duration::from_millis(100)).await;
+        });
+    }
+
+    #[test]
+    fn add_children_batch() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let started_count = Arc::new(AtomicU32::new(0));
+
+            let spec = SupervisorSpec::new(RestartStrategy::OneForOne)
+                .max_restarts(5)
+                .max_seconds(10);
+            let handle = start_supervisor(&rt, spec, vec![]);
+
+            let entries: Vec<ChildEntry> = (0..5)
+                .map(|i| {
+                    let sc = Arc::clone(&started_count);
+                    ChildEntry::new(ChildSpec::new(format!("batch-{}", i)), move || {
+                        let sc = Arc::clone(&sc);
+                        async move {
+                            sc.fetch_add(1, Ordering::SeqCst);
+                            sleep(Duration::from_secs(60)).await;
+                            ExitReason::Normal
+                        }
+                    })
+                })
+                .collect();
+
+            let results = handle.add_children(entries).await;
+            assert_eq!(results.len(), 5);
+            for result in &results {
+                assert!(result.is_ok());
+            }
+
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(started_count.load(Ordering::SeqCst), 5);
+
+            handle.shutdown();
+            sleep(Duration::from_millis(50)).await;
         });
     }
 }

@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 use crate::process::mailbox::MailboxTx;
 use crate::process::{Message, ProcessId, RegistryError, SendError};
@@ -79,6 +81,7 @@ impl ProcessTable {
     }
 
     /// Insert a process handle into the table under the given PID.
+    #[cfg_attr(feature = "tracing", instrument(level = "trace", skip(self, handle)))]
     pub fn insert(&self, pid: ProcessId, handle: ProcessHandle) {
         self.processes.borrow_mut().insert(pid, handle);
     }
@@ -95,6 +98,7 @@ impl ProcessTable {
     /// Remove a process from the table.
     ///
     /// Returns the removed handle, or `None` if the PID was not found.
+    #[cfg_attr(feature = "tracing", instrument(level = "trace", skip(self)))]
     pub fn remove(&self, pid: &ProcessId) -> Option<ProcessHandle> {
         self.names.borrow_mut().retain(|_, v| v != pid);
         self.processes.borrow_mut().remove(pid)
@@ -103,6 +107,7 @@ impl ProcessTable {
     /// Send a message to a process by its PID.
     ///
     /// Returns `SendError::ProcessDead` if the PID is not in the table.
+    #[cfg_attr(feature = "tracing", instrument(level = "trace", skip(self, msg)))]
     pub fn send(&self, pid: ProcessId, msg: Message) -> Result<(), SendError> {
         let processes = self.processes.borrow();
         match processes.get(&pid) {

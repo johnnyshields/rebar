@@ -107,6 +107,7 @@ impl SupervisorSpec {
     }
 }
 
+#[derive(Clone)]
 pub struct ChildSpec {
     pub id: String,
     pub restart: RestartType,

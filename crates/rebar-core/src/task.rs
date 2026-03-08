@@ -240,6 +240,7 @@ where
             }
             Err(payload) => {
                 let msg = panic_message(&payload);
+                #[cfg(feature = "tracing")]
                 tracing::error!("task panicked: {}", msg);
                 state_clone.outcome.set(Some(Err(msg)));
             }

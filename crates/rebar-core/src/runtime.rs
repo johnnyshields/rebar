@@ -5,6 +5,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+#[cfg(feature = "tracing")]
+use tracing::instrument;
+
 use crate::process::mailbox::{Mailbox, MailboxRx};
 use crate::process::table::{ProcessHandle, ProcessTable};
 use crate::process::{Message, ProcessId, RegistryError, SendError};
@@ -282,6 +285,8 @@ impl Runtime {
         self.shutdown.shutdown();
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -643,5 +648,54 @@ mod tests {
             assert_eq!(*result.borrow(), Some("routed".to_string()));
             assert!(counter_ref.count.load(std::sync::atomic::Ordering::Relaxed) > 0);
         });
+    }
+
+    #[test]
+    fn runtime_builder_default_builds() {
+        let (tokio_rt, rebar_rt) = RuntimeBuilder::new(1).build().unwrap();
+        assert_eq!(rebar_rt.node_id(), 1);
+        tokio_rt.block_on(async {
+            let pid = rebar_rt.spawn(|_ctx| async {}).await;
+            assert_eq!(pid.node_id(), 1);
+        });
+    }
+
+    #[test]
+    fn runtime_builder_custom_threads() {
+        let (tokio_rt, rebar_rt) = RuntimeBuilder::new(2)
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        assert_eq!(rebar_rt.node_id(), 2);
+        tokio_rt.block_on(async {
+            let pid = rebar_rt.spawn(|_ctx| async {}).await;
+            assert_eq!(pid.node_id(), 2);
+        });
+    }
+
+    #[test]
+    fn runtime_builder_thread_name() {
+        let (tokio_rt, _rebar_rt) = RuntimeBuilder::new(1)
+            .thread_name("rebar-test")
+            .build()
+            .unwrap();
+        drop(tokio_rt);
+    }
+
+    #[test]
+    fn runtime_builder_start_runs_closure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_clone = Arc::clone(&ran);
+
+        RuntimeBuilder::new(1)
+            .start(move |rt| async move {
+                ran_clone.store(true, Ordering::SeqCst);
+                let pid = rt.spawn(|_ctx| async {}).await;
+                assert_eq!(pid.node_id(), 1);
+            })
+            .unwrap();
+
+        assert!(ran.load(Ordering::SeqCst));
     }
 }

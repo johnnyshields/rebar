@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Core actor primitives and supervision for the Rebar runtime"
 
+[features]
+default = []
+tracing = ["dep:tracing"]
+testing = []
+
 [dependencies]
 compio-buf = "0.8"
 compio-driver = "0.11"
@@ -17,9 +22,26 @@ libc = "0.2"
 rmpv = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tracing = "0.1"
-
-[features]
-testing = []
+tracing = { version = "0.1", optional = true }
+async-trait = "0.1"
+rustc-hash = "2"
 
 [dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "message_passing"
+harness = false
+
+[[bench]]
+name = "process_lifecycle"
+harness = false
+
+[[bench]]
+name = "supervisor"
+harness = false
+
+[[bench]]
+name = "process_table"
+harness = false
