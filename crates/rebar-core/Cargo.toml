@@ -10,10 +10,14 @@ description = "Core actor primitives and supervision for the Rebar runtime"
 default = []
 tracing = ["dep:tracing"]
 testing = []
+tls = ["dep:compio-tls", "dep:rustls"]
 
 [dependencies]
 compio-buf = "0.8"
 compio-driver = "0.11"
+compio-io = "0.9"
+compio-tls = { version = "0.9", features = ["rustls"], optional = true }
+rustls = { version = "0.23", optional = true }
 turbine-core = { git = "https://github.com/johnnyshields/turbine.git", branch = "master" }
 socket2 = { version = "0.5", features = ["all"] }
 futures = "0.3"
@@ -28,6 +32,9 @@ rustc-hash = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+rcgen = "0.13"
+rustls = "0.23"
+compio-tls = { version = "0.9", features = ["rustls"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 static_assertions = "1"
 

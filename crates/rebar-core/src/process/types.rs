@@ -212,9 +212,9 @@ mod tests {
 
     #[test]
     fn message_new_internal_has_no_timestamp() {
-        let msg = Message::new_internal(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
+        let msg = Message::new_internal(ProcessId::new(1, 1, 1), rmpv::Value::Nil);
         assert!(msg.timestamp().is_none());
-        assert_eq!(msg.from(), ProcessId::new(1, 0, 1));
+        assert_eq!(msg.from(), ProcessId::new(1, 1, 1));
     }
 
     #[test]

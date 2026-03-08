@@ -11,5 +11,8 @@ pub mod supervisor;
 pub(crate) mod task;
 pub mod time;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
 #[cfg(feature = "testing")]
 pub mod testing;
