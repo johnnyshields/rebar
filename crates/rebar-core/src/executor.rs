@@ -158,7 +158,6 @@ impl RebarExecutor {
             if now.duration_since(self.last_epoch_rotation.get()) >= self.epoch_interval {
                 let _: Result<(), _> = pool.rotate();
                 let _ = pool.collect();
-                let _ = pool.drain_returns();
                 self.last_epoch_rotation.set(now);
             }
         }
