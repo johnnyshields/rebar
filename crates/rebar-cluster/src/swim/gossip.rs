@@ -30,6 +30,12 @@ pub struct GossipQueue {
     queue: VecDeque<GossipUpdate>,
 }
 
+impl Default for GossipQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GossipQueue {
     pub fn new() -> Self {
         Self {

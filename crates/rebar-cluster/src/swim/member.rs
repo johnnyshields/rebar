@@ -59,6 +59,12 @@ pub struct MembershipList {
     members: HashMap<u64, Member>,
 }
 
+impl Default for MembershipList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MembershipList {
     pub fn new() -> Self {
         Self {

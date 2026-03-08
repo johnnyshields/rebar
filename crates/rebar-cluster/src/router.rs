@@ -85,7 +85,7 @@ pub fn encode_send_frame(from: ProcessId, to: ProcessId, payload: rmpv::Value) -
 
 /// Extract a u64 value from a msgpack Value, returning a SendError if it is not a u64.
 fn require_u64(value: &rmpv::Value, field: &'static str) -> Result<u64, SendError> {
-    value.as_u64().ok_or_else(|| SendError::MalformedFrame(field))
+    value.as_u64().ok_or(SendError::MalformedFrame(field))
 }
 
 /// Deliver an inbound frame from the network to a local process.
@@ -94,7 +94,7 @@ fn require_u64(value: &rmpv::Value, field: &'static str) -> Result<u64, SendErro
 /// payload to the target process's mailbox via the process table.
 pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), SendError> {
     let header = frame.header.as_map()
-        .ok_or_else(|| SendError::MalformedFrame("frame header must be a Map"))?;
+        .ok_or(SendError::MalformedFrame("frame header must be a Map"))?;
 
     let mut from_node: u64 = 0;
     let mut from_local: u64 = 0;
@@ -155,27 +155,30 @@ mod tests {
         assert_eq!(msg.payload().as_str().unwrap(), "local-msg");
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn distributed_router_routes_remote() {
-        let table = Rc::new(ProcessTable::new(1, 0));
-        let (remote_tx, mut remote_rx) = local_sync::mpsc::unbounded::channel();
-        let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
+    #[test]
+    fn distributed_router_routes_remote() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let table = Rc::new(ProcessTable::new(1, 0));
+            let (remote_tx, mut remote_rx) = local_sync::mpsc::unbounded::channel();
+            let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
-        let from = ProcessId::new(1, 0, 5);
-        let remote_pid = ProcessId::new(2, 0, 10);
+            let from = ProcessId::new(1, 0, 5);
+            let remote_pid = ProcessId::new(2, 0, 10);
 
-        router
-            .route(from, remote_pid, rmpv::Value::String("remote-msg".into()))
-            .unwrap();
+            router
+                .route(from, remote_pid, rmpv::Value::String("remote-msg".into()))
+                .unwrap();
 
-        let cmd = remote_rx.recv().await.unwrap();
-        match cmd {
-            RouterCommand::Send { node_id, frame } => {
-                assert_eq!(node_id, 2);
-                assert_eq!(frame.msg_type, MsgType::Send);
-                assert_eq!(frame.payload, rmpv::Value::String("remote-msg".into()));
+            let cmd = remote_rx.recv().await.unwrap();
+            match cmd {
+                RouterCommand::Send { node_id, frame } => {
+                    assert_eq!(node_id, 2);
+                    assert_eq!(frame.msg_type, MsgType::Send);
+                    assert_eq!(frame.payload, rmpv::Value::String("remote-msg".into()));
+                }
             }
-        }
+        });
     }
 
     #[test]

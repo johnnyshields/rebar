@@ -35,17 +35,9 @@ impl SwimConfig {
 }
 
 /// Builder for `SwimConfig`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SwimConfigBuilder {
     config: SwimConfig,
-}
-
-impl Default for SwimConfigBuilder {
-    fn default() -> Self {
-        Self {
-            config: SwimConfig::default(),
-        }
-    }
 }
 
 impl SwimConfigBuilder {

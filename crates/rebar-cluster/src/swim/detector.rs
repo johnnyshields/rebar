@@ -14,6 +14,12 @@ pub struct FailureDetector {
     dead_timers: HashMap<u64, Instant>,
 }
 
+impl Default for FailureDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FailureDetector {
     pub fn new() -> Self {
         Self {
@@ -37,11 +43,11 @@ impl FailureDetector {
     /// A node responded to a ping (or indirect ping).
     /// If it was suspected, move it back to Alive and remove the suspect timer.
     pub fn record_ack(&mut self, members: &mut MembershipList, node_id: u64) {
-        if let Some(member) = members.get_mut(node_id) {
-            if member.state == NodeState::Suspect {
-                member.state = NodeState::Alive;
-                member.incarnation += 1;
-            }
+        if let Some(member) = members.get_mut(node_id)
+            && member.state == NodeState::Suspect
+        {
+            member.state = NodeState::Alive;
+            member.incarnation += 1;
         }
         self.suspect_timers.remove(&node_id);
     }
@@ -49,11 +55,11 @@ impl FailureDetector {
     /// A node did not respond to a direct ping.
     /// Mark it suspect and start a timer (if not already suspected).
     pub fn record_nack(&mut self, members: &mut MembershipList, node_id: u64, now: Instant) {
-        if let Some(member) = members.get_mut(node_id) {
-            if member.state == NodeState::Alive {
-                member.suspect(member.incarnation);
-                self.suspect_timers.entry(node_id).or_insert(now);
-            }
+        if let Some(member) = members.get_mut(node_id)
+            && member.state == NodeState::Alive
+        {
+            member.suspect(member.incarnation);
+            self.suspect_timers.entry(node_id).or_insert(now);
         }
     }
 
@@ -106,10 +112,10 @@ impl FailureDetector {
         for node_id in expired {
             self.dead_timers.remove(&node_id);
             // Remove only this specific node from the membership list.
-            if let Some(m) = members.get(node_id) {
-                if m.state == NodeState::Dead {
-                    removed.push(node_id);
-                }
+            if let Some(m) = members.get(node_id)
+                && m.state == NodeState::Dead
+            {
+                removed.push(node_id);
             }
         }
 
