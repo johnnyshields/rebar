@@ -9,19 +9,6 @@ pub enum RestartStrategy {
     RestForOne,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChildType {
-    Worker,
-    Supervisor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutoShutdown {
-    Never,
-    AnySignificant,
-    AllSignificant,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum RestartType {
     Permanent,
@@ -43,7 +30,6 @@ impl RestartType {
 pub enum ShutdownStrategy {
     Timeout(Duration),
     BrutalKill,
-    Infinity,
 }
 
 #[derive(Debug)]
@@ -72,7 +58,6 @@ pub struct SupervisorSpec {
     pub max_restarts: u32,
     pub max_seconds: u32,
     pub children: Vec<ChildSpec>,
-    pub auto_shutdown: AutoShutdown,
 }
 
 impl SupervisorSpec {
@@ -82,7 +67,6 @@ impl SupervisorSpec {
             max_restarts: 3,
             max_seconds: 5,
             children: Vec::new(),
-            auto_shutdown: AutoShutdown::Never,
         }
     }
 
@@ -100,11 +84,6 @@ impl SupervisorSpec {
         self.children.push(spec);
         self
     }
-
-    pub fn auto_shutdown(mut self, mode: AutoShutdown) -> Self {
-        self.auto_shutdown = mode;
-        self
-    }
 }
 
 #[derive(Clone)]
@@ -112,8 +91,6 @@ pub struct ChildSpec {
     pub id: String,
     pub restart: RestartType,
     pub shutdown: ShutdownStrategy,
-    pub child_type: ChildType,
-    pub significant: bool,
 }
 
 impl ChildSpec {
@@ -122,8 +99,6 @@ impl ChildSpec {
             id: id.into(),
             restart: RestartType::Permanent,
             shutdown: ShutdownStrategy::Timeout(Duration::from_secs(5)),
-            child_type: ChildType::Worker,
-            significant: false,
         }
     }
 
@@ -134,19 +109,6 @@ impl ChildSpec {
 
     pub fn shutdown(mut self, strategy: ShutdownStrategy) -> Self {
         self.shutdown = strategy;
-        self
-    }
-
-    pub fn child_type(mut self, ct: ChildType) -> Self {
-        self.child_type = ct;
-        if ct == ChildType::Supervisor {
-            self.shutdown = ShutdownStrategy::Infinity;
-        }
-        self
-    }
-
-    pub fn significant(mut self, val: bool) -> Self {
-        self.significant = val;
         self
     }
 }
@@ -211,8 +173,6 @@ mod tests {
         assert_eq!(child.id, "test");
         assert!(matches!(child.restart, RestartType::Permanent));
         assert!(matches!(child.shutdown, ShutdownStrategy::Timeout(_)));
-        assert_eq!(child.child_type, ChildType::Worker);
-        assert!(!child.significant);
     }
 
     #[test]
@@ -224,29 +184,4 @@ mod tests {
         assert!(matches!(child.shutdown, ShutdownStrategy::BrutalKill));
     }
 
-    #[test]
-    fn child_type_supervisor_sets_infinity_shutdown() {
-        let child = ChildSpec::new("sup").child_type(ChildType::Supervisor);
-        assert_eq!(child.child_type, ChildType::Supervisor);
-        assert!(matches!(child.shutdown, ShutdownStrategy::Infinity));
-    }
-
-    #[test]
-    fn significant_can_be_set() {
-        let child = ChildSpec::new("test").significant(true);
-        assert!(child.significant);
-    }
-
-    #[test]
-    fn auto_shutdown_defaults_to_never() {
-        let spec = SupervisorSpec::new(RestartStrategy::OneForOne);
-        assert_eq!(spec.auto_shutdown, AutoShutdown::Never);
-    }
-
-    #[test]
-    fn auto_shutdown_builder() {
-        let spec = SupervisorSpec::new(RestartStrategy::OneForOne)
-            .auto_shutdown(AutoShutdown::AnySignificant);
-        assert_eq!(spec.auto_shutdown, AutoShutdown::AnySignificant);
-    }
 }

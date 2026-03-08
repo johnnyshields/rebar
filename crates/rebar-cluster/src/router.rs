@@ -83,18 +83,27 @@ pub fn encode_send_frame(from: ProcessId, to: ProcessId, payload: rmpv::Value) -
     }
 }
 
-/// Extract a u64 value from a msgpack Value, returning a SendError if it is not a u64.
-fn require_u64(value: &rmpv::Value, field: &'static str) -> Result<u64, SendError> {
-    value.as_u64().ok_or(SendError::MalformedFrame(field))
+/// Errors from inbound frame parsing and delivery.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum FrameError {
+    #[error("malformed frame: {0}")]
+    MalformedFrame(&'static str),
+    #[error(transparent)]
+    Send(#[from] SendError),
+}
+
+/// Extract a u64 value from a msgpack Value, returning a FrameError if it is not a u64.
+fn require_u64(value: &rmpv::Value, field: &'static str) -> Result<u64, FrameError> {
+    value.as_u64().ok_or(FrameError::MalformedFrame(field))
 }
 
 /// Deliver an inbound frame from the network to a local process.
 ///
 /// Extracts addressing information from the frame header and delivers the
 /// payload to the target process's mailbox via the process table.
-pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), SendError> {
+pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), FrameError> {
     let header = frame.header.as_map()
-        .ok_or(SendError::MalformedFrame("frame header must be a Map"))?;
+        .ok_or(FrameError::MalformedFrame("frame header must be a Map"))?;
 
     let mut from_node: u64 = 0;
     let mut from_local: u64 = 0;
@@ -121,13 +130,13 @@ pub fn deliver_inbound_frame(table: &ProcessTable, frame: &Frame) -> Result<(), 
     }
 
     if !has_to_node || !has_to_local {
-        return Err(SendError::MalformedFrame("missing required addressing fields: to_node and to_local"));
+        return Err(FrameError::MalformedFrame("missing required addressing fields: to_node and to_local"));
     }
 
     let from = ProcessId::new(from_node, 0, from_local);
     let to = ProcessId::new(to_node, 0, to_local);
     let msg = Message::new(from, frame.payload.clone());
-    table.send(to, msg)
+    Ok(table.send(to, msg)?)
 }
 
 #[cfg(test)]
@@ -242,7 +251,7 @@ mod tests {
             payload: rmpv::Value::Nil,
         };
         let result = deliver_inbound_frame(&table, &frame);
-        assert_eq!(result, Err(SendError::MalformedFrame("frame header must be a Map")));
+        assert_eq!(result, Err(FrameError::MalformedFrame("frame header must be a Map")));
     }
 
     #[test]
@@ -259,7 +268,7 @@ mod tests {
             payload: rmpv::Value::Nil,
         };
         let result = deliver_inbound_frame(&table, &frame);
-        assert_eq!(result, Err(SendError::MalformedFrame("from_node must be u64")));
+        assert_eq!(result, Err(FrameError::MalformedFrame("from_node must be u64")));
     }
 
     #[test]
@@ -275,7 +284,7 @@ mod tests {
         let result = deliver_inbound_frame(&table, &frame);
         assert_eq!(
             result,
-            Err(SendError::MalformedFrame("missing required addressing fields: to_node and to_local"))
+            Err(FrameError::MalformedFrame("missing required addressing fields: to_node and to_local"))
         );
     }
 }

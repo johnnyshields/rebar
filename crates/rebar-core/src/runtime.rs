@@ -187,6 +187,11 @@ impl Runtime {
         &self.table
     }
 
+    /// Return a reference to the message router.
+    pub fn router(&self) -> &Rc<dyn MessageRouter> {
+        &self.router
+    }
+
     /// Return this runtime's node ID.
     pub fn node_id(&self) -> u64 {
         self.node_id
@@ -269,13 +274,13 @@ impl Runtime {
     }
 
     /// Send a message to a named process.
-    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), SendError> {
+    pub fn send_named(&self, name: &str, payload: rmpv::Value) -> Result<(), Box<dyn std::error::Error>> {
         let pid = self
             .table
             .whereis(name)
-            .ok_or_else(|| SendError::NameNotFound(name.to_owned()))?;
+            .ok_or_else(|| RegistryError::NameNotFound(name.to_owned()))?;
         let from = ProcessId::new(self.node_id, 0, 0);
-        self.router.route(from, pid, payload)
+        Ok(self.router.route(from, pid, payload)?)
     }
 
     /// Signal the runtime to shut down.
@@ -650,52 +655,4 @@ mod tests {
         });
     }
 
-    #[test]
-    fn runtime_builder_default_builds() {
-        let (tokio_rt, rebar_rt) = RuntimeBuilder::new(1).build().unwrap();
-        assert_eq!(rebar_rt.node_id(), 1);
-        tokio_rt.block_on(async {
-            let pid = rebar_rt.spawn(|_ctx| async {}).await;
-            assert_eq!(pid.node_id(), 1);
-        });
-    }
-
-    #[test]
-    fn runtime_builder_custom_threads() {
-        let (tokio_rt, rebar_rt) = RuntimeBuilder::new(2)
-            .worker_threads(2)
-            .build()
-            .unwrap();
-        assert_eq!(rebar_rt.node_id(), 2);
-        tokio_rt.block_on(async {
-            let pid = rebar_rt.spawn(|_ctx| async {}).await;
-            assert_eq!(pid.node_id(), 2);
-        });
-    }
-
-    #[test]
-    fn runtime_builder_thread_name() {
-        let (tokio_rt, _rebar_rt) = RuntimeBuilder::new(1)
-            .thread_name("rebar-test")
-            .build()
-            .unwrap();
-        drop(tokio_rt);
-    }
-
-    #[test]
-    fn runtime_builder_start_runs_closure() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let ran = Arc::new(AtomicBool::new(false));
-        let ran_clone = Arc::clone(&ran);
-
-        RuntimeBuilder::new(1)
-            .start(move |rt| async move {
-                ran_clone.store(true, Ordering::SeqCst);
-                let pid = rt.spawn(|_ctx| async {}).await;
-                assert_eq!(pid.node_id(), 1);
-            })
-            .unwrap();
-
-        assert!(ran.load(Ordering::SeqCst));
-    }
 }

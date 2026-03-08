@@ -11,8 +11,7 @@ use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;
 use crate::supervisor::common::{check_restart_limit, shutdown_child_task};
 use crate::supervisor::spec::{
-    AutoShutdown, ChildSpec, ChildType, RestartStrategy, RestartType, SupervisorError,
-    SupervisorSpec,
+    ChildSpec, RestartStrategy, RestartType, SupervisorError, SupervisorSpec,
 };
 
 pub type ChildFactory =
@@ -49,15 +48,12 @@ struct ChildState {
 pub struct ChildCounts {
     pub specs: usize,
     pub active: usize,
-    pub supervisors: usize,
-    pub workers: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChildInfo {
     pub id: String,
     pub pid: Option<ProcessId>,
-    pub child_type: ChildType,
     pub restart: RestartType,
 }
 
@@ -215,7 +211,6 @@ async fn supervisor_loop(
         strategy: spec.strategy,
         max_restarts: spec.max_restarts,
         max_seconds: spec.max_seconds,
-        auto_shutdown: spec.auto_shutdown,
         children: Vec::new(),
         restart_times: VecDeque::new(),
     };
@@ -262,26 +257,6 @@ async fn supervisor_loop(
                 let should_restart = state.children[index].spec.restart.should_restart(&reason);
 
                 if !should_restart {
-                    if state.children[index].spec.significant {
-                        match state.auto_shutdown {
-                            AutoShutdown::AnySignificant => {
-                                shutdown_all_children(&mut state.children).await;
-                                break;
-                            }
-                            AutoShutdown::AllSignificant => {
-                                let all_stopped = state
-                                    .children
-                                    .iter()
-                                    .filter(|c| c.spec.significant)
-                                    .all(|c| c.pid.is_none());
-                                if all_stopped {
-                                    shutdown_all_children(&mut state.children).await;
-                                    break;
-                                }
-                            }
-                            AutoShutdown::Never => {}
-                        }
-                    }
                     continue;
                 }
 
@@ -409,16 +384,6 @@ async fn supervisor_loop(
                 let counts = ChildCounts {
                     specs: state.children.len(),
                     active: state.children.iter().filter(|c| c.pid.is_some()).count(),
-                    supervisors: state
-                        .children
-                        .iter()
-                        .filter(|c| c.spec.child_type == ChildType::Supervisor)
-                        .count(),
-                    workers: state
-                        .children
-                        .iter()
-                        .filter(|c| c.spec.child_type == ChildType::Worker)
-                        .count(),
                 };
                 let _ = reply.send(counts);
             }
@@ -429,7 +394,6 @@ async fn supervisor_loop(
                     .map(|c| ChildInfo {
                         id: c.spec.id.clone(),
                         pid: c.pid,
-                        child_type: c.spec.child_type,
                         restart: c.spec.restart,
                     })
                     .collect();
@@ -451,7 +415,6 @@ struct SupervisorState {
     strategy: RestartStrategy,
     max_restarts: u32,
     max_seconds: u32,
-    auto_shutdown: AutoShutdown,
     children: Vec<ChildState>,
     restart_times: VecDeque<Instant>,
 }

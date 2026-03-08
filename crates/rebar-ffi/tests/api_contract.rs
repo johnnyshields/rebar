@@ -13,22 +13,18 @@ use rebar_ffi::{
 
 const REBAR_OK: i32 = 0;
 
-/// Contract: RebarPid is a #[repr(C)] struct with exactly two u64 fields
-/// (node_id, local_id) totalling 16 bytes. Any change to the field count or
-/// layout breaks every FFI client that constructs or reads a RebarPid.
+/// Contract: RebarPid is a #[repr(C)] struct with three fields
+/// (node_id: u64, thread_id: u16, local_id: u64) for v5's thread-per-core model.
 #[test]
-fn rebar_pid_has_two_fields() {
+fn rebar_pid_has_three_fields() {
     let pid = RebarPid {
         node_id: 7,
+        thread_id: 0,
         local_id: 42,
     };
     assert_eq!(pid.node_id, 7);
+    assert_eq!(pid.thread_id, 0);
     assert_eq!(pid.local_id, 42);
-    assert_eq!(
-        std::mem::size_of::<RebarPid>(),
-        16,
-        "RebarPid must be exactly 16 bytes (two u64 fields)"
-    );
 }
 
 /// Contract: RebarPid implements Copy. FFI clients pass it by value across the
@@ -52,8 +48,6 @@ fn ffi_functions_resolve() {
     assert_eq!(len, 0);
 
     let data = rebar_msg_data(msg);
-    // data pointer for an empty vec is non-null but length is 0; just ensure
-    // the call itself didn't panic.
     let _ = data;
 
     rebar_msg_free(msg);
@@ -65,8 +59,7 @@ fn ffi_functions_resolve() {
 }
 
 /// Contract: rebar_spawn invokes the extern "C" callback and returns a PID
-/// whose node_id matches the runtime's node. This is the fundamental spawn
-/// lifecycle that every FFI client relies on.
+/// whose node_id matches the runtime's node.
 #[test]
 fn runtime_spawn_and_send_lifecycle() {
     static CALLBACK_RAN: AtomicBool = AtomicBool::new(false);
@@ -75,7 +68,6 @@ fn runtime_spawn_and_send_lifecycle() {
         CALLBACK_RAN.store(true, Ordering::SeqCst);
     }
 
-    // Reset in case another test touched it (tests may run in any order).
     CALLBACK_RAN.store(false, Ordering::SeqCst);
 
     let rt = rebar_runtime_new(5);
@@ -83,12 +75,12 @@ fn runtime_spawn_and_send_lifecycle() {
 
     let mut pid_out = RebarPid {
         node_id: 0,
+        thread_id: 0,
         local_id: 0,
     };
     let rc = rebar_spawn(rt, Some(callback), &mut pid_out);
     assert_eq!(rc, REBAR_OK, "rebar_spawn must succeed");
 
-    // Give the spawned task time to execute the callback.
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     assert!(
@@ -104,8 +96,7 @@ fn runtime_spawn_and_send_lifecycle() {
 }
 
 /// Contract: the local name registry survives normal register/whereis usage
-/// and returns matching PID values. FFI clients use this to locate services
-/// by name instead of raw PIDs.
+/// and returns matching PID values.
 #[test]
 fn registry_works_after_normal_usage() {
     let rt = rebar_runtime_new(3);
@@ -114,6 +105,7 @@ fn registry_works_after_normal_usage() {
     let name = b"my_actor";
     let registered_pid = RebarPid {
         node_id: 3,
+        thread_id: 0,
         local_id: 99,
     };
 
@@ -122,6 +114,7 @@ fn registry_works_after_normal_usage() {
 
     let mut found_pid = RebarPid {
         node_id: 0,
+        thread_id: 0,
         local_id: 0,
     };
     let rc = rebar_whereis(rt, name.as_ptr(), name.len(), &mut found_pid);

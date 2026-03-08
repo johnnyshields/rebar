@@ -59,10 +59,18 @@ struct DynChildState {
     join_handle: Option<crate::task::JoinHandle<()>>,
 }
 
+struct TerminatedChildSpec {
+    spec: ChildSpec,
+    #[allow(dead_code)] // retained for potential future restart-from-terminated
+    factory: ChildFactory,
+    original_pid: ProcessId,
+}
+
 enum DynSupervisorMsg {
     ChildExited { pid: ProcessId, reason: ExitReason },
     StartChild { entry: ChildEntry, reply: oneshot::Sender<Result<ProcessId, SupervisorError>> },
     TerminateChild { pid: ProcessId, reply: oneshot::Sender<Result<(), SupervisorError>> },
+    RemoveChild { pid: ProcessId, reply: oneshot::Sender<Result<(), SupervisorError>> },
     CountChildren { reply: oneshot::Sender<DynChildCounts> },
     WhichChildren { reply: oneshot::Sender<Vec<DynChildInfo>> },
     Shutdown,
@@ -71,13 +79,14 @@ enum DynSupervisorMsg {
 /// Counts of children in a dynamic supervisor.
 #[derive(Debug, Clone)]
 pub struct DynChildCounts {
+    pub specs: usize,
     pub active: usize,
 }
 
 /// Information about a child in a dynamic supervisor.
 #[derive(Debug, Clone)]
 pub struct DynChildInfo {
-    pub pid: ProcessId,
+    pub pid: Option<ProcessId>,
     pub id: String,
     pub restart: RestartType,
 }
@@ -131,6 +140,15 @@ impl DynamicSupervisorHandle {
         reply_rx.await.map_err(|_| SupervisorError::Gone)
     }
 
+    /// Remove a terminated child spec by its original PID.
+    pub async fn remove_child(&self, pid: ProcessId) -> Result<(), SupervisorError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.msg_tx
+            .send(DynSupervisorMsg::RemoveChild { pid, reply: reply_tx })
+            .map_err(|_| SupervisorError::Gone)?;
+        reply_rx.await.map_err(|_| SupervisorError::Gone)?
+    }
+
     /// Request the dynamic supervisor to shut down.
     pub fn shutdown(&self) {
         let _ = self.msg_tx.send(DynSupervisorMsg::Shutdown);
@@ -158,6 +176,7 @@ async fn dynamic_supervisor_loop(
     msg_tx: local_mpsc::Tx<DynSupervisorMsg>,
 ) {
     let mut children: HashMap<ProcessId, DynChildState> = HashMap::new();
+    let mut terminated: Vec<TerminatedChildSpec> = Vec::new();
     let mut restart_times = std::collections::VecDeque::new();
     let max_restarts = spec.max_restarts;
     let max_seconds = spec.max_seconds;
@@ -192,6 +211,11 @@ async fn dynamic_supervisor_loop(
                 };
 
                 if !child.spec.restart.should_restart(&reason) {
+                    terminated.push(TerminatedChildSpec {
+                        spec: child.spec,
+                        factory: child.factory,
+                        original_pid: pid,
+                    });
                     continue;
                 }
 
@@ -224,20 +248,44 @@ async fn dynamic_supervisor_loop(
                     }
                 }
             }
+            Some(DynSupervisorMsg::RemoveChild { pid, reply }) => {
+                if children.contains_key(&pid) {
+                    let _ = reply.send(Err(SupervisorError::StillRunning(pid.to_string())));
+                } else {
+                    let idx = terminated.iter().position(|t| t.original_pid == pid);
+                    match idx {
+                        Some(i) => {
+                            terminated.remove(i);
+                            let _ = reply.send(Ok(()));
+                        }
+                        None => {
+                            let _ = reply.send(Err(SupervisorError::NotFound(pid.to_string())));
+                        }
+                    }
+                }
+            }
             Some(DynSupervisorMsg::CountChildren { reply }) => {
                 let _ = reply.send(DynChildCounts {
+                    specs: children.len() + terminated.len(),
                     active: children.len(),
                 });
             }
             Some(DynSupervisorMsg::WhichChildren { reply }) => {
-                let infos = children
+                let mut infos: Vec<DynChildInfo> = children
                     .values()
                     .map(|c| DynChildInfo {
-                        pid: c.pid,
+                        pid: Some(c.pid),
                         id: c.spec.id.clone(),
                         restart: c.spec.restart,
                     })
                     .collect();
+                for t in &terminated {
+                    infos.push(DynChildInfo {
+                        pid: None,
+                        id: t.spec.id.clone(),
+                        restart: t.spec.restart,
+                    });
+                }
                 let _ = reply.send(infos);
             }
             Some(DynSupervisorMsg::Shutdown) => {
@@ -352,6 +400,7 @@ mod tests {
             assert_eq!(pid.node_id(), 0);
 
             let counts = handle.count_children().await.unwrap();
+            assert_eq!(counts.specs, 1);
             assert_eq!(counts.active, 1);
 
             handle.shutdown();
@@ -528,6 +577,7 @@ mod tests {
 
             let counts = handle.count_children().await.unwrap();
             assert_eq!(counts.active, 0);
+            assert_eq!(counts.specs, 1); // terminated but still tracked
 
             handle.shutdown();
         });
@@ -573,6 +623,7 @@ mod tests {
             let handle = start_dynamic_supervisor(&rt, DynamicSupervisorSpec::new());
 
             let counts = handle.count_children().await.unwrap();
+            assert_eq!(counts.specs, 0);
             assert_eq!(counts.active, 0);
 
             for i in 0..3 {
@@ -585,6 +636,7 @@ mod tests {
             }
 
             let counts = handle.count_children().await.unwrap();
+            assert_eq!(counts.specs, 3);
             assert_eq!(counts.active, 3);
 
             handle.shutdown();
@@ -609,7 +661,7 @@ mod tests {
 
             let infos = handle.which_children().await.unwrap();
             assert_eq!(infos.len(), 1);
-            assert_eq!(infos[0].pid, pid);
+            assert_eq!(infos[0].pid, Some(pid));
             assert_eq!(infos[0].id, "my_worker");
             assert!(matches!(infos[0].restart, RestartType::Transient));
 
@@ -788,7 +840,7 @@ mod tests {
             let entry = ChildEntry::new(
                 ChildSpec::new("infinity_child")
                     .restart(RestartType::Temporary)
-                    .shutdown(ShutdownStrategy::Infinity),
+                    .shutdown(ShutdownStrategy::Timeout(Duration::from_secs(300))),
                 || async {
                     // Simulate work then exit when shutdown signal received
                     crate::time::sleep(Duration::from_secs(60)).await;

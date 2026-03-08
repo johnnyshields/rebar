@@ -7,8 +7,7 @@ use rebar_core::channel::mpsc::unbounded as local_mpsc;
 
 use rebar_cluster::connection::{ConnectionManager, TransportConnector};
 use rebar_cluster::protocol::Frame;
-use rebar_cluster::router::{DistributedRouter, RouterCommand, deliver_inbound_frame};
-use rebar_core::process::SendError;
+use rebar_cluster::router::{DistributedRouter, FrameError, RouterCommand, deliver_inbound_frame};
 use rebar_core::process::table::ProcessTable;
 use rebar_core::runtime::Runtime;
 
@@ -66,7 +65,7 @@ impl<C: TransportConnector> DistributedRuntime<C> {
     }
 
     /// Deliver an inbound frame to a local process.
-    pub fn deliver_inbound(&self, frame: &Frame) -> Result<(), SendError> {
+    pub fn deliver_inbound(&self, frame: &Frame) -> Result<(), FrameError> {
         deliver_inbound_frame(&self.table, frame)
     }
 }

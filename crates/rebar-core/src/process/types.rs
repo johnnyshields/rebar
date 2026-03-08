@@ -91,7 +91,6 @@ impl ExitReason {
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
-#[non_exhaustive]
 pub enum SendError {
     #[error("process dead: {0}")]
     ProcessDead(ProcessId),
@@ -99,10 +98,6 @@ pub enum SendError {
     MailboxFull(ProcessId),
     #[error("node unreachable: {0}")]
     NodeUnreachable(u64),
-    #[error("name not found: {0}")]
-    NameNotFound(String),
-    #[error("malformed frame: {0}")]
-    MalformedFrame(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -217,9 +212,9 @@ mod tests {
 
     #[test]
     fn message_new_internal_has_no_timestamp() {
-        let msg = Message::new_internal(ProcessId::new(1, 1), rmpv::Value::Nil);
+        let msg = Message::new_internal(ProcessId::new(1, 0, 1), rmpv::Value::Nil);
         assert!(msg.timestamp().is_none());
-        assert_eq!(msg.from(), ProcessId::new(1, 1));
+        assert_eq!(msg.from(), ProcessId::new(1, 0, 1));
     }
 
     #[test]

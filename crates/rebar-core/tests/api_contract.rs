@@ -1,338 +1,136 @@
-//! API contract regression tests for rebar-core.
+//! API contract tests for rebar-core v5.
 //!
-//! These tests guard against regressions introduced by forks (e.g. johnnyshields/rebar v5)
-//! that broke fundamental API contracts around ProcessId construction, Display format,
-//! trait bounds, async semantics, and panic isolation.
+//! These tests lock down the v5 API surface: ProcessId construction, Display format,
+//! trait bounds (including intentional !Send/!Sync), sync spawn/send, the
+//! test_executor pattern, GenServer typed associated types, and panic isolation.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
+use rebar_core::executor::{ExecutorConfig, RebarExecutor};
 use rebar_core::process::table::ProcessTable;
 use rebar_core::process::{ProcessId, SendError};
 use rebar_core::router::{LocalRouter, MessageRouter};
 use rebar_core::runtime::Runtime;
 
+fn test_executor() -> RebarExecutor {
+    RebarExecutor::new(ExecutorConfig::default()).unwrap()
+}
+
 // ============================================================================
-// Task 1: Compile-time contract tests
+// ProcessId contracts
 // ============================================================================
 
-/// Guards that ProcessId::new takes exactly two arguments (node_id, local_id).
-///
-/// The johnnyshields/rebar v5 fork changed ProcessId to a 3-arg constructor
-/// (node, thread, local). This test ensures our 2-arg contract is preserved.
+/// ProcessId::new takes three arguments (node_id, thread_id, local_id).
 #[test]
-fn process_id_is_two_arg() {
-    let pid = ProcessId::new(1, 42);
+fn process_id_is_three_arg() {
+    let pid = ProcessId::new(1, 0, 42);
     assert_eq!(pid.node_id(), 1);
+    assert_eq!(pid.thread_id(), 0);
     assert_eq!(pid.local_id(), 42);
 
-    let pid2 = ProcessId::new(0, 0);
-    assert_eq!(pid2.node_id(), 0);
-    assert_eq!(pid2.local_id(), 0);
+    let pid2 = ProcessId::new(5, 3, 99);
+    assert_eq!(pid2.node_id(), 5);
+    assert_eq!(pid2.thread_id(), 3);
+    assert_eq!(pid2.local_id(), 99);
 }
 
-/// Guards that ProcessId Display format is `<node.local>`.
-///
-/// The fork changed Display to `<node.thread.local>` (3-part format).
-/// This test ensures the canonical 2-part `<node.local>` format is preserved.
+/// Display format is `<node.thread.local>` (3-part).
 #[test]
-fn process_id_display_format_is_node_dot_local() {
-    assert_eq!(format!("{}", ProcessId::new(1, 42)), "<1.42>");
-    assert_eq!(format!("{}", ProcessId::new(0, 0)), "<0.0>");
-    assert_eq!(format!("{}", ProcessId::new(99, 1000)), "<99.1000>");
+fn process_id_display_format() {
+    assert_eq!(format!("{}", ProcessId::new(1, 0, 42)), "<1.0.42>");
+    assert_eq!(format!("{}", ProcessId::new(0, 0, 0)), "<0.0.0>");
+    assert_eq!(format!("{}", ProcessId::new(99, 7, 1000)), "<99.7.1000>");
 }
 
-/// Guards that ProcessId implements Copy, Send, and Sync.
-///
-/// The fork replaced Copy types with Rc-based types that are neither Send nor Sync.
-/// ProcessId must be freely copyable and safe to share across threads.
+/// ProcessId is Copy (it's just u64+u16+u64 primitives).
 #[test]
-fn process_id_is_copy_send_sync() {
-    fn assert_copy_send_sync<T: Copy + Send + Sync>() {}
-    assert_copy_send_sync::<ProcessId>();
-
-    // Verify Copy works in practice
-    let a = ProcessId::new(1, 1);
+fn process_id_is_copy() {
+    let a = ProcessId::new(1, 0, 42);
     let b = a; // copy
     assert_eq!(a, b); // original still usable
 }
 
-/// Guards that SendError has exactly three variants: ProcessDead, MailboxFull, NodeUnreachable.
-///
-/// The fork may add or remove error variants. This exhaustive match ensures all
-/// three canonical variants exist and no others have been introduced.
+// ============================================================================
+// Trait bound contracts — v5 is intentionally !Send/!Sync (thread-per-core)
+// ============================================================================
+
+// Runtime is NOT Send and NOT Sync (contains Rc).
+static_assertions::assert_not_impl_any!(Runtime: Send, Sync);
+
+// LocalRouter is NOT Send and NOT Sync (contains Rc<ProcessTable>).
+static_assertions::assert_not_impl_any!(LocalRouter: Send, Sync);
+
+// ProcessTable is NOT Send and NOT Sync (contains Cell/RefCell).
+static_assertions::assert_not_impl_any!(ProcessTable: Send, Sync);
+
+// ProcessId IS Send+Sync+Copy (just primitives).
+static_assertions::assert_impl_all!(ProcessId: Copy, Send, Sync);
+
+// ============================================================================
+// Sync spawn / sync send contracts
+// ============================================================================
+
+/// Runtime::spawn is synchronous — returns ProcessId directly, no .await.
+#[test]
+fn spawn_is_sync_returns_pid() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+        let pid: ProcessId = rt.spawn(|_ctx| async {}); // no .await
+        assert_eq!(pid.node_id(), 1);
+        assert!(pid.local_id() > 0);
+    });
+}
+
+/// Runtime::send is synchronous — returns Result directly, no .await.
+#[test]
+fn send_is_sync() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+        let pid = rt.spawn(|mut ctx| async move {
+            let _ = ctx.recv().await;
+        });
+        let result: Result<(), SendError> = rt.send(pid, rmpv::Value::Nil); // no .await
+        assert!(result.is_ok());
+    });
+}
+
+/// Runtime::with_router accepts Rc<ProcessTable> and Rc<dyn MessageRouter>.
+#[test]
+fn runtime_with_router_accepts_rc() {
+    test_executor().block_on(async {
+        let table = Rc::new(ProcessTable::new(1, 0));
+        let router: Rc<dyn MessageRouter> = Rc::new(LocalRouter::new(Rc::clone(&table)));
+        let rt = Runtime::with_router(1, table, router);
+        assert_eq!(rt.node_id(), 1);
+    });
+}
+
+// ============================================================================
+// Error variant contracts
+// ============================================================================
+
+/// SendError has exactly three variants: ProcessDead, MailboxFull, NodeUnreachable.
+/// No NameNotFound, no MalformedFrame, no #[non_exhaustive].
 #[test]
 fn send_error_variants_exhaustive() {
     let errors: Vec<SendError> = vec![
-        SendError::ProcessDead(ProcessId::new(1, 1)),
-        SendError::MailboxFull(ProcessId::new(1, 2)),
+        SendError::ProcessDead(ProcessId::new(1, 0, 1)),
+        SendError::MailboxFull(ProcessId::new(1, 0, 2)),
         SendError::NodeUnreachable(99),
     ];
 
     for err in &errors {
-        // Exhaustive match -- if a variant is added or removed, this will not compile.
         match err {
-            SendError::ProcessDead(pid) => {
-                let _ = pid;
-            }
-            SendError::MailboxFull(pid) => {
-                let _ = pid;
-            }
-            SendError::NodeUnreachable(node) => {
-                let _ = node;
-            }
+            SendError::ProcessDead(pid) => { let _ = pid; }
+            SendError::MailboxFull(pid) => { let _ = pid; }
+            SendError::NodeUnreachable(node) => { let _ = node; }
         }
     }
 }
 
-/// Guards that LocalRouter implements MessageRouter + Send + Sync.
-///
-/// The fork removed Send + Sync bounds from MessageRouter and its implementations,
-/// replacing Arc with Rc throughout. This test ensures the trait hierarchy is intact.
+/// CallError has exactly two variants: Timeout, ServerDead (no SendFailed).
 #[test]
-fn message_router_requires_send_sync() {
-    fn assert_router_send_sync<T: MessageRouter + Send + Sync>() {}
-    assert_router_send_sync::<LocalRouter>();
-}
-
-/// Guards that LocalRouter implements Send + Sync.
-///
-/// LocalRouter must be shareable across threads (via Arc) for the runtime to work.
-/// The fork broke this by using Rc internally.
-#[test]
-fn local_router_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<LocalRouter>();
-}
-
-/// Guards that ProcessTable implements Send + Sync.
-///
-/// ProcessTable is shared across tokio tasks via Arc. If it loses Send + Sync
-/// (e.g. by using Rc or Cell internally), the runtime cannot function.
-#[test]
-fn process_table_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<ProcessTable>();
-}
-
-/// Guards that Runtime implements Send + Sync.
-///
-/// The Runtime must be shareable across threads for use in async contexts.
-/// The fork broke this by using Rc-based internals.
-#[test]
-fn runtime_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Runtime>();
-}
-
-/// Guards that Runtime::with_router accepts Arc parameters.
-///
-/// The fork replaced Arc<ProcessTable> and Arc<dyn MessageRouter> with Rc equivalents.
-/// This test ensures the Arc-based API is preserved.
-#[test]
-fn runtime_with_router_accepts_arc() {
-    let table = Arc::new(ProcessTable::new(1));
-    let router: Arc<dyn MessageRouter> = Arc::new(LocalRouter::new(Arc::clone(&table)));
-    let rt = Runtime::with_router(1, table, router);
-    assert_eq!(rt.node_id(), 1);
-}
-
-// ============================================================================
-// Task 2: Async/runtime contract tests
-// ============================================================================
-
-/// Guards that Runtime::spawn is async and returns a Future.
-///
-/// The fork changed spawn from async to sync, breaking the ability to .await
-/// the PID. This test ensures spawn().await works and returns a valid PID.
-#[tokio::test]
-async fn spawn_is_async_and_returns_future() {
-    let rt = Runtime::new(1);
-    let pid = rt.spawn(|_ctx| async {}).await;
-    assert_eq!(pid.node_id(), 1);
-    assert!(pid.local_id() > 0);
-}
-
-/// Guards that spawn requires Send-bounded handlers and futures.
-///
-/// The fork removed Send bounds, allowing Rc and non-Send types in handlers.
-/// This test verifies that Arc (which is Send) works across .await points
-/// inside spawned processes, which is only possible if the future is Send.
-#[tokio::test]
-async fn spawn_requires_send_handler() {
-    let rt = Runtime::new(1);
-    let shared = Arc::new(std::sync::Mutex::new(0u64));
-    let shared_clone = Arc::clone(&shared);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    rt.spawn(move |_ctx| async move {
-        // Hold Arc across an .await point -- only valid if future is Send
-        tokio::task::yield_now().await;
-        let mut val = shared_clone.lock().unwrap();
-        *val = 42;
-        tx.send(()).unwrap();
-    })
-    .await;
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), rx)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(*shared.lock().unwrap(), 42);
-}
-
-/// Guards that Runtime::send is async.
-///
-/// The fork changed send from async to sync. This test ensures send().await
-/// compiles and works correctly.
-#[tokio::test]
-async fn runtime_send_is_async() {
-    let rt = Runtime::new(1);
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-
-    let pid = rt
-        .spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            done_tx
-                .send(msg.payload().as_str().unwrap().to_string())
-                .unwrap();
-        })
-        .await;
-
-    // This .await is the contract under test
-    rt.send(pid, rmpv::Value::String("async-send".into()))
-        .await
-        .unwrap();
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result, "async-send");
-}
-
-/// Guards that ProcessContext::send is async.
-///
-/// The fork changed context send from async to sync. This test ensures
-/// ctx.send().await compiles and works inside a spawned process.
-#[tokio::test]
-async fn context_send_is_async() {
-    let rt = Runtime::new(1);
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-
-    let receiver = rt
-        .spawn(move |mut ctx| async move {
-            let msg = ctx.recv().await.unwrap();
-            done_tx
-                .send(msg.payload().as_str().unwrap().to_string())
-                .unwrap();
-        })
-        .await;
-
-    rt.spawn(move |ctx| async move {
-        // This .await is the contract under test
-        ctx.send(receiver, rmpv::Value::String("ctx-async".into()))
-            .await
-            .unwrap();
-    })
-    .await;
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result, "ctx-async");
-}
-
-/// Guards that a panicking process does not crash the runtime.
-///
-/// The fork removed panic isolation, meaning a panicking process would bring
-/// down the entire runtime. This test spawns a panicking process, waits for
-/// cleanup, then spawns a healthy process to prove the runtime survived.
-#[tokio::test]
-async fn panicking_process_does_not_crash_runtime() {
-    let rt = Runtime::new(1);
-
-    rt.spawn(|_ctx| async move {
-        panic!("intentional panic for contract test");
-    })
-    .await;
-
-    // Allow the panic to propagate and cleanup to occur
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    rt.spawn(move |_ctx| async move {
-        tx.send(true).unwrap();
-    })
-    .await;
-
-    let survived = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(survived, "runtime must survive a process panic");
-}
-
-/// Guards that a panicked process is cleaned up from the process table.
-///
-/// After a process panics, its PID must be removed from the table so that
-/// sending to it returns ProcessDead. The fork removed this cleanup.
-#[tokio::test]
-async fn panicking_process_is_cleaned_up() {
-    let rt = Runtime::new(1);
-
-    let pid = rt
-        .spawn(|_ctx| async move {
-            panic!("intentional panic for cleanup test");
-        })
-        .await;
-
-    // Wait for panic propagation and table cleanup
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    let result = rt.send(pid, rmpv::Value::Nil).await;
-    assert!(
-        matches!(result, Err(SendError::ProcessDead(_))),
-        "sending to a panicked PID must return ProcessDead, got: {:?}",
-        result
-    );
-}
-
-/// Guards that concurrent spawns from multiple tokio tasks all produce unique PIDs.
-///
-/// This validates that PID allocation is atomic and thread-safe. The fork's use of
-/// Rc and non-Send types would make concurrent spawning impossible.
-#[tokio::test]
-async fn concurrent_spawn_from_multiple_tasks() {
-    let rt = Arc::new(Runtime::new(1));
-    let mut handles = Vec::new();
-
-    for _ in 0..5 {
-        let rt = Arc::clone(&rt);
-        handles.push(tokio::spawn(async move {
-            rt.spawn(|_ctx| async {}).await
-        }));
-    }
-
-    let mut pids = std::collections::HashSet::new();
-    for handle in handles {
-        let pid = handle.await.unwrap();
-        assert!(pids.insert(pid), "duplicate PID detected: {}", pid);
-    }
-
-    assert_eq!(pids.len(), 5, "expected 5 unique PIDs from concurrent spawns");
-}
-
-// === GenServer API contracts ===
-
-#[test]
-fn gen_server_context_is_send() {
-    fn assert_send<T: Send>() {}
-    assert_send::<rebar_core::gen_server::GenServerContext>();
-}
-
-#[test]
-fn call_error_has_timeout_and_server_dead_variants() {
+fn call_error_variants() {
     let err = rebar_core::gen_server::CallError::Timeout;
     match err {
         rebar_core::gen_server::CallError::Timeout => {}
@@ -340,19 +138,119 @@ fn call_error_has_timeout_and_server_dead_variants() {
     }
 }
 
-// === DynamicSupervisor API contracts ===
+// ============================================================================
+// Panic isolation
+// ============================================================================
 
+/// A panicking process does not crash the runtime. After the panic, a new
+/// healthy process can be spawned and runs successfully.
 #[test]
-fn dynamic_supervisor_handle_is_clone_send() {
-    fn assert_clone_send<T: Clone + Send>() {}
-    assert_clone_send::<rebar_core::supervisor::DynamicSupervisorHandle>();
+fn panic_isolation() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+
+        rt.spawn(|_ctx| async move {
+            panic!("intentional panic for contract test");
+        });
+
+        // Let the panic propagate
+        rebar_core::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Runtime survives — spawn a healthy process
+        let done = Rc::new(std::cell::Cell::new(false));
+        let done_clone = Rc::clone(&done);
+        rt.spawn(move |_ctx| async move {
+            done_clone.set(true);
+        });
+
+        rebar_core::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(done.get(), "runtime must survive a process panic");
+    });
 }
 
+/// After a process panics, sending to its PID returns ProcessDead.
 #[test]
-fn dynamic_supervisor_spec_builder_pattern() {
-    let spec = rebar_core::supervisor::DynamicSupervisorSpec::new()
-        .max_restarts(10)
-        .max_seconds(60);
-    let _ = spec;
+fn panicking_process_cleaned_up() {
+    test_executor().block_on(async {
+        let rt = Runtime::new(1);
+
+        let pid = rt.spawn(|_ctx| async move {
+            panic!("intentional panic for cleanup test");
+        });
+
+        rebar_core::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let result = rt.send(pid, rmpv::Value::Nil);
+        assert!(
+            matches!(result, Err(SendError::ProcessDead(_))),
+            "sending to a panicked PID must return ProcessDead, got: {:?}",
+            result
+        );
+    });
 }
 
+// ============================================================================
+// GenServer typed associated types (compile-time test)
+// ============================================================================
+
+/// GenServer trait requires typed Call, Cast, and Reply associated types.
+#[test]
+fn gen_server_has_typed_associated_types() {
+    use rebar_core::gen_server::{
+        CallReply, CastReply, From, GenServer, GenServerContext, InfoReply,
+    };
+
+    struct TestServer;
+
+    impl GenServer for TestServer {
+        type State = u64;
+        type Call = String;
+        type Cast = String;
+        type Reply = String;
+
+        async fn init(&self, _ctx: &GenServerContext) -> Result<Self::State, String> {
+            Ok(0)
+        }
+
+        async fn handle_call(
+            &self,
+            _msg: Self::Call,
+            _from: From,
+            state: Self::State,
+            _ctx: &GenServerContext,
+        ) -> CallReply<Self::State> {
+            CallReply::Reply(rmpv::Value::Nil, state)
+        }
+
+        async fn handle_cast(
+            &self,
+            _msg: Self::Cast,
+            state: Self::State,
+            _ctx: &GenServerContext,
+        ) -> CastReply<Self::State> {
+            CastReply::NoReply(state)
+        }
+
+        async fn handle_info(
+            &self,
+            _msg: rmpv::Value,
+            state: Self::State,
+            _ctx: &GenServerContext,
+        ) -> InfoReply<Self::State> {
+            InfoReply::NoReply(state)
+        }
+    }
+
+    // If this compiles, the typed associated types contract holds.
+    let _ = std::any::type_name::<TestServer>();
+}
+
+// ============================================================================
+// DynamicSupervisorHandle is Clone
+// ============================================================================
+
+#[test]
+fn dynamic_supervisor_handle_is_clone() {
+    fn assert_clone<T: Clone>() {}
+    assert_clone::<rebar_core::supervisor::DynamicSupervisorHandle>();
+}

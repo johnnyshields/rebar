@@ -33,7 +33,7 @@ pub(crate) fn check_restart_limit(
 }
 
 /// Shared child task shutdown logic.
-/// Handles BrutalKill, Timeout, and Infinity strategies.
+/// Handles BrutalKill and Timeout strategies.
 pub(crate) async fn shutdown_child_task(
     strategy: &ShutdownStrategy,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -54,10 +54,6 @@ pub(crate) async fn shutdown_child_task(
             if crate::time::timeout(*duration, handle).await.is_err() {
                 // Timed out waiting for graceful shutdown
             }
-        }
-        (ShutdownStrategy::Infinity, Some(tx), Some(handle)) => {
-            let _ = tx.send(());
-            let _ = handle.await;
         }
         _ => {}
     }
