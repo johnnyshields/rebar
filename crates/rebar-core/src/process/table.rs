@@ -48,6 +48,17 @@ impl ProcessTable {
         }
     }
 
+    /// Create a new process table with a pre-sized capacity hint.
+    ///
+    /// Pre-sizing avoids rehashing when the expected number of processes is known.
+    pub fn with_capacity(node_id: u64, capacity: usize) -> Self {
+        Self {
+            node_id,
+            next_id: AtomicU64::new(1),
+            processes: DashMap::with_capacity(capacity),
+        }
+    }
+
     /// Allocate a new unique process ID on this node.
     ///
     /// Uses atomic fetch-and-add for lock-free, concurrent-safe allocation.
@@ -223,6 +234,15 @@ mod tests {
         for h in handles {
             assert!(h.join().unwrap().is_ok());
         }
+    }
+
+    #[test]
+    fn with_capacity_works() {
+        let table = ProcessTable::with_capacity(1, 1000);
+        let pid = table.allocate_pid();
+        let (tx, _rx) = crate::process::mailbox::Mailbox::unbounded();
+        table.insert(pid, ProcessHandle::new(tx));
+        assert!(table.get(&pid).is_some());
     }
 
     #[test]
