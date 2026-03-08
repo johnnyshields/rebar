@@ -55,7 +55,7 @@ enum FfiCommand {
     Shutdown,
 }
 
-/// Opaque runtime wrapper holding a rebar executor thread, a crossbeam command
+/// Opaque runtime wrapper holding a rebar executor thread, an mpsc command
 /// channel, and a simple local name registry.
 pub struct RebarRuntime {
     cmd_tx: std::sync::mpsc::Sender<FfiCommand>,

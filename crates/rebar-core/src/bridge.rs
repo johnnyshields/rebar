@@ -16,9 +16,9 @@ pub struct CrossThreadMessage {
 
 /// Low-level bridge for cross-thread message delivery.
 ///
-/// Each thread owns a `ThreadBridge` with access to all threads' crossbeam
+/// Each thread owns a `ThreadBridge` with access to all threads' mpsc
 /// senders and its own local receiver. When a message targets a different
-/// thread, it is sent via crossbeam and the target thread is woken via eventfd
+/// thread, it is sent via `std::sync::mpsc` and the target thread is woken via eventfd
 /// (Linux) or a self-pipe (non-Linux).
 pub struct ThreadBridge {
     senders: Arc<Vec<Sender<CrossThreadMessage>>>,

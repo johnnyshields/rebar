@@ -49,7 +49,7 @@ where
 {
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Create crossbeam channels for each thread
+    // Create mpsc channels for each thread
     let mut senders = Vec::with_capacity(num_threads);
     let mut receivers = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
