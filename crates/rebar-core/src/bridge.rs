@@ -2,7 +2,7 @@ use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crossbeam_channel::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 
 use crate::process::table::ProcessTable;
 use crate::process::{Message, ProcessId, SendError};
@@ -212,7 +212,7 @@ mod tests {
         let (tx, mut rx) = Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
 
-        let (sender, receiver) = crossbeam_channel::unbounded();
+        let (sender, receiver) = std::sync::mpsc::channel();
         let senders = Arc::new(vec![sender]);
         let eventfds = Arc::new(vec![create_wake_fd()]);
         let bridge = Rc::new(ThreadBridge::new(senders, receiver, 0, eventfds));
@@ -239,8 +239,8 @@ mod tests {
         table1.insert(target_pid, ProcessHandle::new(tx1));
 
         // Create bridge channels for 2 threads
-        let (sender0, receiver0) = crossbeam_channel::unbounded();
-        let (sender1, receiver1) = crossbeam_channel::unbounded();
+        let (sender0, receiver0) = std::sync::mpsc::channel();
+        let (sender1, receiver1) = std::sync::mpsc::channel();
         let senders = Arc::new(vec![sender0, sender1]);
         let eventfds = Arc::new(create_wake_fds(2));
 
@@ -275,7 +275,7 @@ mod tests {
         let (tx, mut rx) = Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
 
-        let (sender, receiver) = crossbeam_channel::unbounded();
+        let (sender, receiver) = std::sync::mpsc::channel();
         let senders = Arc::new(vec![sender.clone()]);
         let eventfds = Arc::new(vec![create_wake_fd()]);
         let bridge = ThreadBridge::new(Arc::clone(&senders), receiver, 0, eventfds);

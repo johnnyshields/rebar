@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use local_sync::oneshot;
+use crate::channel::oneshot;
 
 use super::spec::ShutdownStrategy;
 

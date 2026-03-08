@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod channel;
 pub mod executor;
 pub mod gen_server;
 pub mod io;

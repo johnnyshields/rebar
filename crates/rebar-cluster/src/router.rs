@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use local_sync::mpsc::unbounded::Tx;
+use rebar_core::channel::mpsc::unbounded::Tx;
 
 use crate::protocol::{Frame, MsgType};
 use rebar_core::process::table::ProcessTable;
@@ -143,7 +143,7 @@ mod tests {
         let (tx, mut rx) = Mailbox::unbounded();
         table.insert(pid, ProcessHandle::new(tx));
 
-        let (remote_tx, _remote_rx) = local_sync::mpsc::unbounded::channel();
+        let (remote_tx, _remote_rx) = rebar_core::channel::mpsc::unbounded::channel();
         let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
         let from = ProcessId::new(1, 0, 0);
@@ -160,7 +160,7 @@ mod tests {
         let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let table = Rc::new(ProcessTable::new(1, 0));
-            let (remote_tx, mut remote_rx) = local_sync::mpsc::unbounded::channel();
+            let (remote_tx, mut remote_rx) = rebar_core::channel::mpsc::unbounded::channel();
             let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
             let from = ProcessId::new(1, 0, 5);
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn distributed_router_node_unreachable() {
         let table = Rc::new(ProcessTable::new(1, 0));
-        let (remote_tx, remote_rx) = local_sync::mpsc::unbounded::channel();
+        let (remote_tx, remote_rx) = rebar_core::channel::mpsc::unbounded::channel();
         let router = DistributedRouter::new(1, Rc::clone(&table), remote_tx);
 
         // Drop receiver so send fails

@@ -302,7 +302,7 @@ pub async fn call_from_runtime(
     timeout: std::time::Duration,
 ) -> Result<rmpv::Value, CallError> {
     let ref_id = CALL_REF_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = local_sync::oneshot::channel();
+    let (tx, rx) = crate::channel::oneshot::channel();
 
     runtime.spawn(move |mut ctx| async move {
         let envelope = rmpv::Value::Map(vec![
@@ -394,7 +394,7 @@ pub fn child_entry<S: GenServer + Clone>(
         let server = server.clone();
         let args = args.clone();
         async move {
-            let (exit_tx, exit_rx) = local_sync::oneshot::channel();
+            let (exit_tx, exit_rx) = crate::channel::oneshot::channel();
             let server = Rc::new(server);
             runtime.spawn(move |ctx| async move {
                 let reason = gen_server_loop(server, args, ctx).await;

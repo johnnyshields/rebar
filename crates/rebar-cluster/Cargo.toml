@@ -8,8 +8,6 @@ description = "Distributed clustering, transport, and registry for the Rebar run
 
 [dependencies]
 rebar-core = { path = "../rebar-core" }
-local-sync = "0.1"
-crossbeam-channel = "0.5"
 rmpv = "1"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }

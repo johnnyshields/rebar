@@ -48,18 +48,18 @@ impl BoundedState {
 
 /// Inner sender type that handles both bounded and unbounded channels.
 enum TxInner {
-    Unbounded(local_sync::mpsc::unbounded::Tx<Message>),
+    Unbounded(crate::channel::mpsc::unbounded::Tx<Message>),
     Bounded {
-        tx: local_sync::mpsc::unbounded::Tx<Message>,
+        tx: crate::channel::mpsc::unbounded::Tx<Message>,
         state: Rc<BoundedState>,
     },
 }
 
 /// Inner receiver type that handles both bounded and unbounded channels.
 enum RxInner {
-    Unbounded(local_sync::mpsc::unbounded::Rx<Message>),
+    Unbounded(crate::channel::mpsc::unbounded::Rx<Message>),
     Bounded {
-        rx: local_sync::mpsc::unbounded::Rx<Message>,
+        rx: crate::channel::mpsc::unbounded::Rx<Message>,
         state: Rc<BoundedState>,
     },
 }
@@ -106,7 +106,7 @@ impl Mailbox {
     /// The sender will never block or fail due to capacity constraints.
     /// Messages are only lost if the receiver is dropped.
     pub fn unbounded() -> (MailboxTx, MailboxRx) {
-        let (tx, rx) = local_sync::mpsc::unbounded::channel();
+        let (tx, rx) = crate::channel::mpsc::unbounded::channel();
         (
             MailboxTx {
                 inner: TxInner::Unbounded(tx),
@@ -122,7 +122,7 @@ impl Mailbox {
     /// When the mailbox is full, `try_send` will return `SendError::MailboxFull`
     /// and `send` will also return an error for bounded channels at capacity.
     pub fn bounded(capacity: usize) -> (MailboxTx, MailboxRx) {
-        let (tx, rx) = local_sync::mpsc::unbounded::channel();
+        let (tx, rx) = crate::channel::mpsc::unbounded::channel();
         let state = Rc::new(BoundedState::new(capacity));
         (
             MailboxTx {
@@ -197,7 +197,7 @@ impl MailboxTx {
     ///
     /// Returns `SendError::ProcessDead` if the receiver has been dropped.
     fn send_unbounded(
-        tx: &local_sync::mpsc::unbounded::Tx<Message>,
+        tx: &crate::channel::mpsc::unbounded::Tx<Message>,
         msg: Message,
     ) -> Result<(), SendError> {
         let from = msg.from();

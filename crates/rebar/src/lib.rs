@@ -3,7 +3,7 @@ pub use rebar_core::*;
 
 use std::rc::Rc;
 
-use local_sync::mpsc::unbounded as local_mpsc;
+use rebar_core::channel::mpsc::unbounded as local_mpsc;
 
 use rebar_cluster::connection::{ConnectionManager, TransportConnector};
 use rebar_cluster::protocol::Frame;
@@ -120,7 +120,7 @@ mod tests {
             let mgr = ConnectionManager::new(MockConnector);
             let drt = DistributedRuntime::new(1, mgr);
 
-            let (done_tx, done_rx) = local_sync::oneshot::channel();
+            let (done_tx, done_rx) = rebar_core::channel::oneshot::channel();
 
             let receiver = drt
                 .runtime()

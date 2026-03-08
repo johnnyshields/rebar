@@ -45,12 +45,12 @@ pub struct RebarMsg {
 enum FfiCommand {
     Spawn {
         callback: extern "C" fn(RebarPid),
-        reply: crossbeam_channel::Sender<ProcessId>,
+        reply: std::sync::mpsc::SyncSender<ProcessId>,
     },
     Send {
         dest: ProcessId,
         payload: rmpv::Value,
-        reply: crossbeam_channel::Sender<Result<(), rebar_core::process::SendError>>,
+        reply: std::sync::mpsc::SyncSender<Result<(), rebar_core::process::SendError>>,
     },
     Shutdown,
 }
@@ -58,7 +58,7 @@ enum FfiCommand {
 /// Opaque runtime wrapper holding a rebar executor thread, a crossbeam command
 /// channel, and a simple local name registry.
 pub struct RebarRuntime {
-    cmd_tx: crossbeam_channel::Sender<FfiCommand>,
+    cmd_tx: std::sync::mpsc::Sender<FfiCommand>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     #[allow(dead_code)] // read via raw pointer in tests
     node_id: u64,
@@ -152,7 +152,7 @@ pub extern "C" fn rebar_msg_free(msg: *mut RebarMsg) {
 /// Returns a heap-allocated `RebarRuntime` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<FfiCommand>();
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<FfiCommand>();
 
     let thread_handle = std::thread::spawn(move || {
         let ex = rebar_core::executor::RebarExecutor::new(
@@ -182,11 +182,11 @@ pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
                         runtime.shutdown();
                         break;
                     }
-                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
                         // Yield to let the executor process other tasks
                         rebar_core::time::sleep(std::time::Duration::from_micros(100)).await;
                     }
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         runtime.shutdown();
                         break;
                     }
@@ -238,7 +238,7 @@ pub extern "C" fn rebar_spawn(
         None => return REBAR_ERR_NULL_PTR,
     };
 
-    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
     if rt.cmd_tx.send(FfiCommand::Spawn { callback: cb, reply: reply_tx }).is_err() {
         return REBAR_ERR_SEND_FAILED;
     }
@@ -274,7 +274,7 @@ pub extern "C" fn rebar_send(rt: *mut RebarRuntime, dest: RebarPid, msg: *const 
     let dest_pid = dest.to_process_id();
     let payload = rmpv::Value::Binary(msg.data.clone());
 
-    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
     if rt.cmd_tx.send(FfiCommand::Send { dest: dest_pid, payload, reply: reply_tx }).is_err() {
         return REBAR_ERR_SEND_FAILED;
     }
@@ -383,7 +383,7 @@ pub extern "C" fn rebar_send_named(
     let msg_ref = unsafe { &*msg };
     let payload = rmpv::Value::Binary(msg_ref.data.clone());
 
-    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
     if rt_ref.cmd_tx.send(FfiCommand::Send { dest: dest_pid, payload, reply: reply_tx }).is_err() {
         return REBAR_ERR_SEND_FAILED;
     }

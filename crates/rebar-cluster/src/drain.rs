@@ -74,7 +74,7 @@ impl NodeDrain {
     /// Returns (count, timed_out).
     pub async fn drain_outbound<C: TransportConnector>(
         &self,
-        remote_rx: &mut local_sync::mpsc::unbounded::Rx<crate::router::RouterCommand>,
+        remote_rx: &mut rebar_core::channel::mpsc::unbounded::Rx<crate::router::RouterCommand>,
         connection_manager: &mut ConnectionManager<C>,
     ) -> (usize, bool) {
         let start = Instant::now();
@@ -113,7 +113,7 @@ impl NodeDrain {
         addr: SocketAddr,
         gossip: &mut GossipQueue,
         registry: &mut Registry,
-        remote_rx: &mut local_sync::mpsc::unbounded::Rx<crate::router::RouterCommand>,
+        remote_rx: &mut rebar_core::channel::mpsc::unbounded::Rx<crate::router::RouterCommand>,
         connection_manager: &mut ConnectionManager<C>,
         process_count: usize,
     ) -> DrainResult {
@@ -264,7 +264,7 @@ mod tests {
     fn drain_waits_for_inflight() {
         let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
-            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let (tx, mut rx) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
             let mut mgr = ConnectionManager::new(NullConnector);
             mgr.connect(2, test_addr()).await.unwrap();
 
@@ -298,7 +298,7 @@ mod tests {
     fn drain_respects_timeout() {
         let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
-            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let (tx, mut rx) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
             let mut mgr = ConnectionManager::new(NullConnector);
 
             let drain = NodeDrain::new(DrainConfig {
@@ -327,7 +327,7 @@ mod tests {
             let mut registry = Registry::new();
             registry.register("svc", ProcessId::new(1, 0, 1), 1, 100);
 
-            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let (tx, mut rx) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
             let mut mgr = ConnectionManager::new(NullConnector);
             mgr.connect(2, test_addr()).await.unwrap();
 
@@ -383,7 +383,7 @@ mod tests {
         ex.block_on(async {
             let mut gossip = GossipQueue::new();
             let mut registry = Registry::new();
-            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let (tx, mut rx) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
             drop(tx);
             let mut mgr = ConnectionManager::new(NullConnector);
 

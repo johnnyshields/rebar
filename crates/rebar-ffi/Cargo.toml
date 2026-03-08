@@ -13,4 +13,3 @@ crate-type = ["cdylib", "lib"]
 rebar = { path = "../rebar" }
 rebar-core = { path = "../rebar-core" }
 rmpv = "1"
-crossbeam-channel = "0.5"

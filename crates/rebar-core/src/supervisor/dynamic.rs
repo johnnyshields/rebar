@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use local_sync::mpsc::unbounded as local_mpsc;
-use local_sync::oneshot;
+use crate::channel::mpsc::unbounded as local_mpsc;
+use crate::channel::oneshot;
 
 use crate::process::{ExitReason, ProcessId};
 use crate::runtime::Runtime;

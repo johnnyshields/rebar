@@ -531,13 +531,13 @@ fn end_to_end_cross_node_send_via_tcp() {
 
     // --- Node 1 setup ---
     let table1 = Rc::new(ProcessTable::new(1, 0));
-    let (remote_tx1, mut remote_rx1) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+    let (remote_tx1, mut remote_rx1) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
     let router1 = Rc::new(DistributedRouter::new(1, Rc::clone(&table1), remote_tx1));
     let rt1 = Runtime::with_router(1, Rc::clone(&table1), router1);
 
     // --- Node 2 setup ---
     let table2 = Rc::new(ProcessTable::new(2, 0));
-    let (remote_tx2, _remote_rx2) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+    let (remote_tx2, _remote_rx2) = rebar_core::channel::mpsc::unbounded::channel::<RouterCommand>();
     let router2 = Rc::new(DistributedRouter::new(2, Rc::clone(&table2), remote_tx2));
     let rt2 = Runtime::with_router(2, Rc::clone(&table2), router2);
 
@@ -550,7 +550,7 @@ fn end_to_end_cross_node_send_via_tcp() {
     let node2_addr = listener.local_addr();
 
     // Node 2: spawn a receiver process
-    let (done_tx, done_rx) = local_sync::oneshot::channel();
+    let (done_tx, done_rx) = rebar_core::channel::oneshot::channel();
     let receiver_pid = rt2
         .spawn(move |mut ctx| async move {
             let msg = ctx.recv().await.unwrap();

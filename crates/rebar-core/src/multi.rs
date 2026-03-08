@@ -3,8 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use crossbeam_channel;
-
 use crate::bridge::{create_wake_fds, CrossThreadMessage, ThreadBridge, ThreadBridgeRouter};
 use crate::process::table::ProcessTable;
 use crate::runtime::Runtime;
@@ -55,7 +53,7 @@ where
     let mut senders = Vec::with_capacity(num_threads);
     let mut receivers = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
-        let (tx, rx) = crossbeam_channel::unbounded::<CrossThreadMessage>();
+        let (tx, rx) = std::sync::mpsc::channel::<CrossThreadMessage>();
         senders.push(tx);
         receivers.push(Some(rx));
     }
