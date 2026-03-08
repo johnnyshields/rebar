@@ -251,6 +251,58 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
+    /// Connect to a remote address, returning a new `TcpStream`.
+    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_nonblocking(true)?;
+
+        let fd = OwnedFd::from(socket);
+        executor::with_executor(|ex| ex.proactor().borrow_mut().attach(fd.as_raw_fd()))?;
+
+        let shared_fd = SharedFd::new(fd);
+        let connect_op = op::Connect::new(shared_fd.clone(), addr.into());
+        let BufResult(result, _) = submit(connect_op).await;
+        result?;
+
+        Ok(Self { fd: shared_fd })
+    }
+
+    /// Read exactly `buf.len()` bytes, returning the filled buffer.
+    ///
+    /// Ownership of `buf` is transferred for the duration of the operation.
+    /// On success the buffer is returned fully filled. On error (including
+    /// unexpected EOF) the partially-filled buffer is returned.
+    pub async fn read_exact(&self, mut buf: Vec<u8>) -> BufResult<(), Vec<u8>> {
+        let total = buf.len();
+        let mut filled = 0;
+        while filled < total {
+            let slice = vec![0u8; total - filled];
+            let BufResult(result, returned) = self.read(slice).await;
+            match result {
+                Ok(0) => {
+                    return BufResult(
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF during read_exact",
+                        )),
+                        buf,
+                    );
+                }
+                Ok(n) => {
+                    buf[filled..filled + n].copy_from_slice(&returned[..n]);
+                    filled += n;
+                }
+                Err(e) => return BufResult(Err(e), buf),
+            }
+        }
+        BufResult(Ok(()), buf)
+    }
+
     /// Read into a buffer, returning `(bytes_read, buffer)`.
     ///
     /// Ownership of `buf` is passed to the kernel for the duration of the
@@ -489,6 +541,69 @@ mod tests {
             assert_eq!(&buf[..n], b"hello leased");
 
             echo.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn tcp_stream_connect() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let echo = crate::executor::spawn(async move {
+                let (stream, _peer) = listener.accept().await.unwrap();
+                let buf = Vec::with_capacity(64);
+                let BufResult(result, buf) = stream.read(buf).await;
+                let n = result.unwrap();
+                let data = buf[..n].to_vec();
+                let BufResult(result, _) = stream.write(data).await;
+                result.unwrap();
+            });
+
+            let client = TcpStream::connect(addr).await.unwrap();
+
+            let msg = b"via connect".to_vec();
+            let BufResult(result, _) = client.write(msg).await;
+            result.unwrap();
+
+            let buf = Vec::with_capacity(64);
+            let BufResult(result, buf) = client.read(buf).await;
+            let n = result.unwrap();
+            assert_eq!(&buf[..n], b"via connect");
+
+            echo.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn tcp_stream_read_exact() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = crate::executor::spawn(async move {
+                let (stream, _peer) = listener.accept().await.unwrap();
+                let BufResult(result, _) = stream.write_all(b"hello world!!".to_vec()).await;
+                result.unwrap();
+            });
+
+            let client = TcpStream::connect(addr).await.unwrap();
+
+            // Read exactly 5 bytes
+            let buf = vec![0u8; 5];
+            let BufResult(result, buf) = client.read_exact(buf).await;
+            result.unwrap();
+            assert_eq!(&buf, b"hello");
+
+            // Read remaining 8 bytes
+            let buf = vec![0u8; 8];
+            let BufResult(result, buf) = client.read_exact(buf).await;
+            result.unwrap();
+            assert_eq!(&buf, b" world!!");
+
+            server.await.unwrap();
         });
     }
 

@@ -8,7 +8,6 @@ description = "Distributed clustering, transport, and registry for the Rebar run
 
 [dependencies]
 rebar-core = { path = "../rebar-core" }
-monoio = { version = "0.2", features = ["sync", "utils"] }
 local-sync = "0.1"
 crossbeam-channel = "0.5"
 rmpv = "1"

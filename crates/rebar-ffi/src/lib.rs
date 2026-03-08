@@ -1,3 +1,8 @@
+// FFI functions perform null checks before dereferencing raw pointers.
+// Clippy's not_unsafe_ptr_arg_deref lint is a false positive here because
+// every function guards against null before any dereference.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -36,7 +41,7 @@ pub struct RebarMsg {
     data: Vec<u8>,
 }
 
-/// Commands sent from C FFI to the monoio scheduler thread.
+/// Commands sent from C FFI to the rebar executor thread.
 enum FfiCommand {
     Spawn {
         callback: extern "C" fn(RebarPid),
@@ -50,11 +55,12 @@ enum FfiCommand {
     Shutdown,
 }
 
-/// Opaque runtime wrapper holding a monoio worker thread, a crossbeam command
+/// Opaque runtime wrapper holding a rebar executor thread, a crossbeam command
 /// channel, and a simple local name registry.
 pub struct RebarRuntime {
     cmd_tx: crossbeam_channel::Sender<FfiCommand>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    #[allow(dead_code)] // read via raw pointer in tests
     node_id: u64,
     registry: Mutex<HashMap<String, ProcessId>>,
 }
@@ -142,19 +148,19 @@ pub extern "C" fn rebar_msg_free(msg: *mut RebarMsg) {
 
 /// Create a new runtime for the given node ID.
 ///
-/// Spawns a dedicated monoio thread that runs the rebar runtime.
+/// Spawns a dedicated rebar executor thread that runs the rebar runtime.
 /// Returns a heap-allocated `RebarRuntime` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<FfiCommand>();
 
     let thread_handle = std::thread::spawn(move || {
-        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-            .enable_timer()
-            .build()
-            .expect("failed to build monoio runtime");
+        let ex = rebar_core::executor::RebarExecutor::new(
+            rebar_core::executor::ExecutorConfig::default(),
+        )
+        .expect("failed to build rebar executor");
 
-        rt.block_on(async move {
+        ex.block_on(async move {
             let runtime = Runtime::new(node_id);
 
             loop {
@@ -177,8 +183,8 @@ pub extern "C" fn rebar_runtime_new(node_id: u64) -> *mut RebarRuntime {
                         break;
                     }
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        // Yield to let monoio process other tasks
-                        monoio::time::sleep(std::time::Duration::from_micros(100)).await;
+                        // Yield to let the executor process other tasks
+                        rebar_core::time::sleep(std::time::Duration::from_micros(100)).await;
                     }
                     Err(crossbeam_channel::TryRecvError::Disconnected) => {
                         runtime.shutdown();

@@ -14,7 +14,7 @@ use rebar_core::runtime::Runtime;
 
 /// A fully wired distributed runtime bridging rebar-core and rebar-cluster.
 ///
-/// This struct lives on a single monoio thread. All Rc fields are thread-local.
+/// This struct lives on a single executor thread. All Rc fields are thread-local.
 pub struct DistributedRuntime<C: TransportConnector> {
     runtime: Runtime,
     table: Rc<ProcessTable>,
@@ -113,75 +113,81 @@ mod tests {
         }
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn distributed_runtime_local_send() {
-        let mgr = ConnectionManager::new(MockConnector);
-        let drt = DistributedRuntime::new(1, mgr);
+    #[test]
+    fn distributed_runtime_local_send() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let mgr = ConnectionManager::new(MockConnector);
+            let drt = DistributedRuntime::new(1, mgr);
 
-        let (done_tx, done_rx) = local_sync::oneshot::channel();
+            let (done_tx, done_rx) = local_sync::oneshot::channel();
 
-        let receiver = drt
-            .runtime()
-            .spawn(move |mut ctx| async move {
-                let msg = ctx.recv().await.unwrap();
-                done_tx
-                    .send(msg.payload().as_str().unwrap().to_string())
-                    .ok();
-            });
+            let receiver = drt
+                .runtime()
+                .spawn(move |mut ctx| async move {
+                    let msg = ctx.recv().await.unwrap();
+                    done_tx
+                        .send(msg.payload().as_str().unwrap().to_string())
+                        .ok();
+                });
 
-        drt.runtime()
-            .spawn(move |ctx| async move {
-                ctx.send(receiver, rmpv::Value::String("local".into()))
-                    .unwrap();
-            });
+            drt.runtime()
+                .spawn(move |ctx| async move {
+                    ctx.send(receiver, rmpv::Value::String("local".into()))
+                        .unwrap();
+                });
 
-        let result = monoio::time::timeout(
-            std::time::Duration::from_secs(1),
-            done_rx,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(result, "local");
+            let result = rebar_core::time::timeout(
+                std::time::Duration::from_secs(1),
+                done_rx,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, "local");
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn distributed_runtime_inbound_delivery() {
-        let mgr = ConnectionManager::new(MockConnector);
-        let drt = DistributedRuntime::new(2, mgr);
+    #[test]
+    fn distributed_runtime_inbound_delivery() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let mgr = ConnectionManager::new(MockConnector);
+            let drt = DistributedRuntime::new(2, mgr);
 
-        let pid = drt.table().allocate_pid();
-        let (tx, mut rx) = Mailbox::unbounded();
-        drt.table().insert(pid, ProcessHandle::new(tx));
+            let pid = drt.table().allocate_pid();
+            let (tx, mut rx) = Mailbox::unbounded();
+            drt.table().insert(pid, ProcessHandle::new(tx));
 
-        let frame = Frame {
-            version: 1,
-            msg_type: MsgType::Send,
-            request_id: 0,
-            header: rmpv::Value::Map(vec![
-                (
-                    rmpv::Value::String("from_node".into()),
-                    rmpv::Value::Integer(1u64.into()),
-                ),
-                (
-                    rmpv::Value::String("from_local".into()),
-                    rmpv::Value::Integer(5u64.into()),
-                ),
-                (
-                    rmpv::Value::String("to_node".into()),
-                    rmpv::Value::Integer(pid.node_id().into()),
-                ),
-                (
-                    rmpv::Value::String("to_local".into()),
-                    rmpv::Value::Integer(pid.local_id().into()),
-                ),
-            ]),
-            payload: rmpv::Value::String("from-remote-node".into()),
-        };
+            let frame = Frame {
+                version: 1,
+                msg_type: MsgType::Send,
+                request_id: 0,
+                header: rmpv::Value::Map(vec![
+                    (
+                        rmpv::Value::String("from_node".into()),
+                        rmpv::Value::Integer(1u64.into()),
+                    ),
+                    (
+                        rmpv::Value::String("from_local".into()),
+                        rmpv::Value::Integer(5u64.into()),
+                    ),
+                    (
+                        rmpv::Value::String("to_node".into()),
+                        rmpv::Value::Integer(pid.node_id().into()),
+                    ),
+                    (
+                        rmpv::Value::String("to_local".into()),
+                        rmpv::Value::Integer(pid.local_id().into()),
+                    ),
+                ]),
+                payload: rmpv::Value::String("from-remote-node".into()),
+            };
 
-        drt.deliver_inbound(&frame).unwrap();
+            drt.deliver_inbound(&frame).unwrap();
 
-        let msg = rx.try_recv().unwrap();
-        assert_eq!(msg.payload().as_str().unwrap(), "from-remote-node");
+            let msg = rx.try_recv().unwrap();
+            assert_eq!(msg.payload().as_str().unwrap(), "from-remote-node");
+        });
     }
 }

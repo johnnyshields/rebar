@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
-use monoio::io::{AsyncReadRentExt, AsyncWriteRentExt};
-use monoio::net::{TcpListener, TcpStream};
+use rebar_core::io::{BufResult, TcpListener, TcpStream};
 
 use crate::protocol::Frame;
 use crate::transport::traits::{TransportConnection, TransportError, TransportListener};
@@ -15,6 +14,12 @@ use crate::transport::traits::{TransportConnection, TransportError, TransportLis
 /// +----------+--------------+
 /// ```
 pub struct TcpTransport;
+
+impl Default for TcpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TcpTransport {
     pub fn new() -> Self {
@@ -59,9 +64,9 @@ impl TransportConnection for TcpConnection {
         let encoded = frame.encode();
         let len = encoded.len() as u32;
         let len_bytes = len.to_be_bytes().to_vec();
-        let (result, _) = stream.write_all(len_bytes).await;
+        let BufResult(result, _) = stream.write_all(len_bytes).await;
         result?;
-        let (result, _) = stream.write_all(encoded).await;
+        let BufResult(result, _) = stream.write_all(encoded).await;
         result?;
         Ok(())
     }
@@ -69,7 +74,7 @@ impl TransportConnection for TcpConnection {
     async fn recv(&mut self) -> Result<Frame, TransportError> {
         let stream = self.stream.as_mut().ok_or(TransportError::ConnectionClosed)?;
         let len_buf = vec![0u8; 4];
-        let (result, len_buf) = stream.read_exact(len_buf).await;
+        let BufResult(result, len_buf) = stream.read_exact(len_buf).await;
         match result {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -79,7 +84,7 @@ impl TransportConnection for TcpConnection {
         }
         let len = u32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
         let buf = vec![0u8; len];
-        let (result, buf) = stream.read_exact(buf).await;
+        let BufResult(result, buf) = stream.read_exact(buf).await;
         result?;
         let frame = Frame::decode(&buf)?;
         Ok(frame)
@@ -97,191 +102,213 @@ mod tests {
     use super::*;
     use crate::protocol::{Frame, MsgType};
 
-    #[monoio::test(enable_timer = true)]
-    async fn connect_and_send_frame() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
+    #[test]
+    fn connect_and_send_frame() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
 
-        // We can't use monoio::spawn (it returns JoinHandle differently),
-        // so we use a simple sequential approach: client sends, then we accept.
-        let mut client = transport.connect(addr).await.unwrap();
-        let frame = Frame {
-            version: 1,
-            msg_type: MsgType::Heartbeat,
-            request_id: 0,
-            header: rmpv::Value::Nil,
-            payload: rmpv::Value::Nil,
-        };
-        client.send(&frame).await.unwrap();
-        client.close().await.unwrap();
+            let mut client = transport.connect(addr).await.unwrap();
+            let frame = Frame {
+                version: 1,
+                msg_type: MsgType::Heartbeat,
+                request_id: 0,
+                header: rmpv::Value::Nil,
+                payload: rmpv::Value::Nil,
+            };
+            client.send(&frame).await.unwrap();
+            client.close().await.unwrap();
 
-        let mut conn = listener.accept().await.unwrap();
-        let received = conn.recv().await.unwrap();
-        assert_eq!(received.msg_type, MsgType::Heartbeat);
+            let mut conn = listener.accept().await.unwrap();
+            let received = conn.recv().await.unwrap();
+            assert_eq!(received.msg_type, MsgType::Heartbeat);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn bidirectional_echo() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
+    #[test]
+    fn bidirectional_echo() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
 
-        let mut client = transport.connect(addr).await.unwrap();
-        let frame = Frame {
-            version: 1,
-            msg_type: MsgType::Send,
-            request_id: 42,
-            header: rmpv::Value::Nil,
-            payload: rmpv::Value::String("ping".into()),
-        };
-        client.send(&frame).await.unwrap();
+            let mut client = transport.connect(addr).await.unwrap();
+            let frame = Frame {
+                version: 1,
+                msg_type: MsgType::Send,
+                request_id: 42,
+                header: rmpv::Value::Nil,
+                payload: rmpv::Value::String("ping".into()),
+            };
+            client.send(&frame).await.unwrap();
 
-        let mut server_conn = listener.accept().await.unwrap();
-        let received = server_conn.recv().await.unwrap();
-        server_conn.send(&received).await.unwrap();
+            let mut server_conn = listener.accept().await.unwrap();
+            let received = server_conn.recv().await.unwrap();
+            server_conn.send(&received).await.unwrap();
 
-        let response = client.recv().await.unwrap();
-        assert_eq!(response.request_id, 42);
-        assert_eq!(response.payload, rmpv::Value::String("ping".into()));
+            let response = client.recv().await.unwrap();
+            assert_eq!(response.request_id, 42);
+            assert_eq!(response.payload, rmpv::Value::String("ping".into()));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn multiple_frames_sequential() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
+    #[test]
+    fn multiple_frames_sequential() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
 
-        let mut client = transport.connect(addr).await.unwrap();
-        for i in 0..5u64 {
+            let mut client = transport.connect(addr).await.unwrap();
+            for i in 0..5u64 {
+                client
+                    .send(&Frame {
+                        version: 1,
+                        msg_type: MsgType::Send,
+                        request_id: i,
+                        header: rmpv::Value::Nil,
+                        payload: rmpv::Value::Integer(i.into()),
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            let mut conn = listener.accept().await.unwrap();
+            let mut frames = Vec::new();
+            for _ in 0..5 {
+                frames.push(conn.recv().await.unwrap());
+            }
+            assert_eq!(frames.len(), 5);
+            for (i, f) in frames.iter().enumerate() {
+                assert_eq!(f.request_id, i as u64);
+            }
+        });
+    }
+
+    #[test]
+    fn large_frame() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
+
+            let mut client = transport.connect(addr).await.unwrap();
+            let big = "x".repeat(1_000_000);
             client
                 .send(&Frame {
                     version: 1,
                     msg_type: MsgType::Send,
-                    request_id: i,
+                    request_id: 0,
                     header: rmpv::Value::Nil,
-                    payload: rmpv::Value::Integer(i.into()),
+                    payload: rmpv::Value::String(big.into()),
                 })
                 .await
                 .unwrap();
-        }
 
-        let mut conn = listener.accept().await.unwrap();
-        let mut frames = Vec::new();
-        for _ in 0..5 {
-            frames.push(conn.recv().await.unwrap());
-        }
-        assert_eq!(frames.len(), 5);
-        for (i, f) in frames.iter().enumerate() {
-            assert_eq!(f.request_id, i as u64);
-        }
+            let mut conn = listener.accept().await.unwrap();
+            let received = conn.recv().await.unwrap();
+            assert_eq!(received.payload.as_str().unwrap().len(), 1_000_000);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn large_frame() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
-
-        let mut client = transport.connect(addr).await.unwrap();
-        let big = "x".repeat(1_000_000);
-        client
-            .send(&Frame {
-                version: 1,
-                msg_type: MsgType::Send,
-                request_id: 0,
-                header: rmpv::Value::Nil,
-                payload: rmpv::Value::String(big.into()),
-            })
-            .await
-            .unwrap();
-
-        let mut conn = listener.accept().await.unwrap();
-        let received = conn.recv().await.unwrap();
-        assert_eq!(received.payload.as_str().unwrap().len(), 1_000_000);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn recv_after_close_returns_error() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
-
-        let mut client = transport.connect(addr).await.unwrap();
-        client.close().await.unwrap();
-
-        let mut conn = listener.accept().await.unwrap();
-        let result = conn.recv().await;
-        assert!(result.is_err());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn connect_to_invalid_address_returns_error() {
-        let transport = TcpTransport::new();
-        let result = transport.connect("127.0.0.1:1".parse().unwrap()).await;
-        assert!(result.is_err());
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn listener_local_addr() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
-        assert_eq!(
-            addr.ip(),
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-        );
-        assert_ne!(addr.port(), 0);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn high_throughput() {
-        let transport = TcpTransport::new();
-        let listener = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        let addr = listener.local_addr();
-        let count = 1000u64;
-
-        let mut client = transport.connect(addr).await.unwrap();
-        for i in 0..count {
-            client
-                .send(&Frame {
-                    version: 1,
-                    msg_type: MsgType::Heartbeat,
-                    request_id: i,
-                    header: rmpv::Value::Nil,
-                    payload: rmpv::Value::Nil,
-                })
+    #[test]
+    fn recv_after_close_returns_error() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
                 .await
                 .unwrap();
-        }
+            let addr = listener.local_addr();
 
-        let mut conn = listener.accept().await.unwrap();
-        let mut received = 0u64;
-        for _ in 0..count {
-            conn.recv().await.unwrap();
-            received += 1;
-        }
-        assert_eq!(received, count);
+            let mut client = transport.connect(addr).await.unwrap();
+            client.close().await.unwrap();
+
+            let mut conn = listener.accept().await.unwrap();
+            let result = conn.recv().await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn connect_to_invalid_address_returns_error() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let result = transport.connect("127.0.0.1:1".parse().unwrap()).await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn listener_local_addr() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
+            assert_eq!(
+                addr.ip(),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            );
+            assert_ne!(addr.port(), 0);
+        });
+    }
+
+    #[test]
+    fn high_throughput() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let transport = TcpTransport::new();
+            let listener = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr();
+            let count = 1000u64;
+
+            let mut client = transport.connect(addr).await.unwrap();
+            for i in 0..count {
+                client
+                    .send(&Frame {
+                        version: 1,
+                        msg_type: MsgType::Heartbeat,
+                        request_id: i,
+                        header: rmpv::Value::Nil,
+                        payload: rmpv::Value::Nil,
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            let mut conn = listener.accept().await.unwrap();
+            let mut received = 0u64;
+            for _ in 0..count {
+                conn.recv().await.unwrap();
+                received += 1;
+            }
+            assert_eq!(received, count);
+        });
     }
 }

@@ -115,8 +115,10 @@ fn pid(node: u64, local: u64) -> ProcessId {
 /// Node A gossips about itself so Node B can discover it.
 /// Node B gossips about itself so Node A can discover it.
 /// After the exchange, both membership lists see the other node as Alive.
-#[monoio::test(enable_timer = true)]
-async fn two_nodes_discover_via_swim() {
+#[test]
+fn two_nodes_discover_via_swim() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     // Node A (id=1) starts with itself in its membership list
     let mut list_a = MembershipList::new();
     list_a.add(Member::new(1, test_addr(5000)));
@@ -190,14 +192,17 @@ async fn two_nodes_discover_via_swim() {
     // Both lists have 2 alive members (self + peer)
     assert_eq!(list_a.alive_count(), 2);
     assert_eq!(list_b.alive_count(), 2);
+    });
 }
 
 // ─── Test 2: send_message_across_nodes ─────────────────────────────────────
 
 /// Start two TCP listeners on ephemeral ports, connect from node A to node B,
 /// send a frame, and verify node B receives it correctly.
-#[monoio::test(enable_timer = true)]
-async fn send_message_across_nodes() {
+#[test]
+fn send_message_across_nodes() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     let transport = TcpTransport::new();
 
     // Node B listens on ephemeral port
@@ -208,7 +213,7 @@ async fn send_message_across_nodes() {
     let addr_b = listener_b.local_addr();
 
     // Server task: Node B accepts and receives one frame
-    let server = monoio::spawn(async move {
+    let server = rebar_core::executor::spawn(async move {
         let mut conn = listener_b.accept().await.unwrap();
         conn.recv().await.unwrap()
     });
@@ -229,7 +234,7 @@ async fn send_message_across_nodes() {
     client.close().await.unwrap();
 
     // Verify the received frame
-    let received = server.await;
+    let received = server.await.unwrap();
     assert_eq!(received.version, 1);
     assert_eq!(received.msg_type, MsgType::Send);
     assert_eq!(received.request_id, 42);
@@ -237,6 +242,7 @@ async fn send_message_across_nodes() {
         received.payload,
         rmpv::Value::String("hello from node A".into())
     );
+    });
 }
 
 // ─── Test 3: remote_process_monitor_fires_on_exit ──────────────────────────
@@ -246,8 +252,10 @@ async fn send_message_across_nodes() {
 /// 2. Node B receives it and verifies the message type.
 /// 3. Node B sends a ProcessDown frame back to Node A.
 /// 4. Node A verifies the ProcessDown frame.
-#[monoio::test(enable_timer = true)]
-async fn remote_process_monitor_fires_on_exit() {
+#[test]
+fn remote_process_monitor_fires_on_exit() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     let transport = TcpTransport::new();
 
     let listener_b = transport
@@ -257,7 +265,7 @@ async fn remote_process_monitor_fires_on_exit() {
     let addr_b = listener_b.local_addr();
 
     // Node B: accept connection, receive Monitor request, send ProcessDown back
-    let server = monoio::spawn(async move {
+    let server = rebar_core::executor::spawn(async move {
         let mut conn = listener_b.accept().await.unwrap();
 
         // Receive the monitor request
@@ -318,7 +326,8 @@ async fn remote_process_monitor_fires_on_exit() {
         .map(|(_, v)| v.as_str().unwrap().to_string());
     assert_eq!(reason, Some("normal".to_string()));
 
-    server.await;
+    server.await.unwrap();
+    });
 }
 
 // ─── Test 4: registry_name_resolves_across_nodes ───────────────────────────
@@ -326,8 +335,10 @@ async fn remote_process_monitor_fires_on_exit() {
 /// Two registries on different nodes. A name registered on Registry A is
 /// replicated to Registry B via deltas. Registry B can then look up the name
 /// and resolve it to the correct PID.
-#[monoio::test(enable_timer = true)]
-async fn registry_name_resolves_across_nodes() {
+#[test]
+fn registry_name_resolves_across_nodes() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     let mut reg_a = Registry::new();
     let mut reg_b = Registry::new();
 
@@ -367,14 +378,17 @@ async fn registry_name_resolves_across_nodes() {
     // Verify both registries agree
     let a_entry = reg_a.lookup("global_server").unwrap();
     assert_eq!(a_entry.pid, entry.pid);
+    });
 }
 
 // ─── Test 5: node_down_fires_when_node_disconnects ─────────────────────────
 
 /// Use the ConnectionManager with a mock transport. Connect to a node, then
 /// trigger on_connection_lost. Verify the NodeDown event is emitted.
-#[monoio::test(enable_timer = true)]
-async fn node_down_fires_when_node_disconnects() {
+#[test]
+fn node_down_fires_when_node_disconnects() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     let connector = Rc::new(MockConnector::new());
     let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
 
@@ -396,14 +410,17 @@ async fn node_down_fires_when_node_disconnects() {
     // Node should no longer be connected
     assert!(!mgr.is_connected(5));
     assert_eq!(mgr.connection_count(), 0);
+    });
 }
 
 // ─── Test 6: reconnection_after_transient_failure ──────────────────────────
 
 /// Connect to a node, simulate connection loss, then use attempt_reconnect
 /// to restore the connection. Verify the node is connected again afterward.
-#[monoio::test(enable_timer = true)]
-async fn reconnection_after_transient_failure() {
+#[test]
+fn reconnection_after_transient_failure() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     let connector = Rc::new(MockConnector::new());
     let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
 
@@ -427,14 +444,17 @@ async fn reconnection_after_transient_failure() {
 
     // Verify reconnect attempt counter was reset
     assert_eq!(mgr.reconnect_attempt_count(10), 0);
+    });
 }
 
 // ─── Test 7: three_node_mesh_all_connected ─────────────────────────────────
 
 /// Simulate three nodes, each with a ConnectionManager, forming a full mesh.
 /// Each node connects to the other two. Verify each has connection_count() == 2.
-#[monoio::test(enable_timer = true)]
-async fn three_node_mesh_all_connected() {
+#[test]
+fn three_node_mesh_all_connected() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     // Create three independent ConnectionManagers (one per node)
     let connector_1 = Rc::new(MockConnector::new());
     let connector_2 = Rc::new(MockConnector::new());
@@ -485,13 +505,16 @@ async fn three_node_mesh_all_connected() {
     assert!(mgr_3.is_connected(1));
     assert!(mgr_3.is_connected(2));
     assert!(!mgr_3.is_connected(3));
+    });
 }
 
 // ─── Test 8: end_to_end_cross_node_send_via_tcp ────────────────────────────
 
 /// End-to-end: two DistributedRuntimes send messages via TCP transport.
-#[monoio::test(enable_timer = true)]
-async fn end_to_end_cross_node_send_via_tcp() {
+#[test]
+fn end_to_end_cross_node_send_via_tcp() {
+    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    ex.block_on(async {
     struct TcpConnector;
 
     impl TransportConnector for TcpConnector {
@@ -541,7 +564,7 @@ async fn end_to_end_cross_node_send_via_tcp() {
 
     // Node 2: accept connection and deliver inbound frames
     let table2_clone = Rc::clone(&table2);
-    let server = monoio::spawn(async move {
+    let server = rebar_core::executor::spawn(async move {
         let mut conn = listener.accept().await.unwrap();
         loop {
             match conn.recv().await {
@@ -569,11 +592,12 @@ async fn end_to_end_cross_node_send_via_tcp() {
     }
 
     // Node 2: verify message received
-    let timeout_result = monoio::time::timeout(std::time::Duration::from_secs(5), done_rx).await;
+    let timeout_result = rebar_core::time::timeout(std::time::Duration::from_secs(5), done_rx).await;
     let (from_node, payload) = timeout_result.unwrap().unwrap();
     assert_eq!(from_node, 1);
     assert_eq!(payload, "cross-node-hello");
 
     // Ensure the background accept task completed cleanly
     drop(server);
+    });
 }

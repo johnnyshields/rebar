@@ -9,7 +9,6 @@ description = "A BEAM-inspired distributed actor runtime"
 [dependencies]
 rebar-core = { path = "../rebar-core" }
 rebar-cluster = { path = "../rebar-cluster" }
-monoio = { version = "0.2", features = ["sync", "utils"] }
 local-sync = "0.1"
 crossbeam-channel = "0.5"
 rmpv = "1"

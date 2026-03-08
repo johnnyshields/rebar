@@ -382,256 +382,304 @@ mod tests {
 
     // ─── Connection Lifecycle Tests ────────────────────────────────
 
-    #[monoio::test(enable_timer = true)]
-    async fn connect_to_new_node() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn connect_to_new_node() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.connect(1, test_addr(4001)).await.unwrap();
 
-        assert!(mgr.is_connected(1));
-        assert_eq!(mgr.connection_count(), 1);
-        assert_eq!(mock.connect_count(), 1);
+            assert!(mgr.is_connected(1));
+            assert_eq!(mgr.connection_count(), 1);
+            assert_eq!(mock.connect_count(), 1);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn route_frame_to_connected_node() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn route_frame_to_connected_node() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.route(1, &heartbeat_frame()).await.unwrap();
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.route(1, &heartbeat_frame()).await.unwrap();
 
-        let sent = mock.sent_data();
-        assert_eq!(sent.len(), 1);
-        let decoded = Frame::decode(&sent[0]).unwrap();
-        assert_eq!(decoded.msg_type, MsgType::Heartbeat);
+            let sent = mock.sent_data();
+            assert_eq!(sent.len(), 1);
+            let decoded = Frame::decode(&sent[0]).unwrap();
+            assert_eq!(decoded.msg_type, MsgType::Heartbeat);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn route_to_unknown_node_returns_error() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn route_to_unknown_node_returns_error() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        let result = mgr.route(999, &heartbeat_frame()).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ConnectionError::UnknownNode(id) => assert_eq!(id, 999),
-            other => panic!("expected UnknownNode, got: {:?}", other),
-        }
+            let result = mgr.route(999, &heartbeat_frame()).await;
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                ConnectionError::UnknownNode(id) => assert_eq!(id, 999),
+                other => panic!("expected UnknownNode, got: {:?}", other),
+            }
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn disconnect_node() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn disconnect_node() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        assert!(mgr.is_connected(1));
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            assert!(mgr.is_connected(1));
 
-        mgr.disconnect(1).await.unwrap();
-        assert!(!mgr.is_connected(1));
-        assert_eq!(mgr.connection_count(), 0);
+            mgr.disconnect(1).await.unwrap();
+            assert!(!mgr.is_connected(1));
+            assert_eq!(mgr.connection_count(), 0);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn reconnect_after_disconnect() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn reconnect_after_disconnect() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.disconnect(1).await.unwrap();
-        assert!(!mgr.is_connected(1));
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.disconnect(1).await.unwrap();
+            assert!(!mgr.is_connected(1));
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        assert!(mgr.is_connected(1));
-        assert_eq!(mock.connect_count(), 2);
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            assert!(mgr.is_connected(1));
+            assert_eq!(mock.connect_count(), 2);
+        });
     }
 
     // ─── Event Handling Tests ──────────────────────────────────────
 
-    #[monoio::test(enable_timer = true)]
-    async fn on_node_discovered_connects() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn on_node_discovered_connects() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
+            mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
 
-        assert!(mgr.is_connected(1));
-        assert_eq!(mock.connect_count(), 1);
+            assert!(mgr.is_connected(1));
+            assert_eq!(mock.connect_count(), 1);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn on_node_discovered_idempotent() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn on_node_discovered_idempotent() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
-        mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
-        mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
+            mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
+            mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
+            mgr.on_node_discovered(1, test_addr(4001)).await.unwrap();
 
-        assert_eq!(mgr.connection_count(), 1);
-        assert_eq!(mock.connect_count(), 1);
+            assert_eq!(mgr.connection_count(), 1);
+            assert_eq!(mock.connect_count(), 1);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn on_connection_lost_fires_node_down() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn on_connection_lost_fires_node_down() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        let events = mgr.on_connection_lost(1).await;
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            let events = mgr.on_connection_lost(1).await;
 
-        assert!(!mgr.is_connected(1));
-        assert!(events.contains(&ConnectionEvent::NodeDown(1)));
+            assert!(!mgr.is_connected(1));
+            assert!(events.contains(&ConnectionEvent::NodeDown(1)));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn on_connection_lost_triggers_reconnect() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn on_connection_lost_triggers_reconnect() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        let events = mgr.on_connection_lost(1).await;
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            let events = mgr.on_connection_lost(1).await;
 
-        assert!(events.contains(&ConnectionEvent::ReconnectTriggered(1)));
+            assert!(events.contains(&ConnectionEvent::ReconnectTriggered(1)));
+        });
     }
 
     // ─── Reconnection Tests ───────────────────────────────────────
 
-    #[monoio::test(enable_timer = true)]
-    async fn exponential_backoff_timing() {
-        let policy = ReconnectPolicy {
-            base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(30),
-        };
+    #[test]
+    fn exponential_backoff_timing() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let policy = ReconnectPolicy {
+                base_delay: Duration::from_secs(1),
+                max_delay: Duration::from_secs(30),
+            };
 
-        assert_eq!(policy.backoff_delay(0), Duration::from_secs(1));
-        assert_eq!(policy.backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(policy.backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(policy.backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(policy.backoff_delay(4), Duration::from_secs(16));
+            assert_eq!(policy.backoff_delay(0), Duration::from_secs(1));
+            assert_eq!(policy.backoff_delay(1), Duration::from_secs(2));
+            assert_eq!(policy.backoff_delay(2), Duration::from_secs(4));
+            assert_eq!(policy.backoff_delay(3), Duration::from_secs(8));
+            assert_eq!(policy.backoff_delay(4), Duration::from_secs(16));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn max_backoff_capped() {
-        let policy = ReconnectPolicy {
-            base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(30),
-        };
+    #[test]
+    fn max_backoff_capped() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let policy = ReconnectPolicy {
+                base_delay: Duration::from_secs(1),
+                max_delay: Duration::from_secs(30),
+            };
 
-        assert_eq!(policy.backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(policy.backoff_delay(10), Duration::from_secs(30));
-        assert_eq!(policy.backoff_delay(100), Duration::from_secs(30));
+            assert_eq!(policy.backoff_delay(5), Duration::from_secs(30));
+            assert_eq!(policy.backoff_delay(10), Duration::from_secs(30));
+            assert_eq!(policy.backoff_delay(100), Duration::from_secs(30));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn reconnect_succeeds_restores_routing() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn reconnect_succeeds_restores_routing() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.on_connection_lost(1).await;
-        assert!(!mgr.is_connected(1));
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.on_connection_lost(1).await;
+            assert!(!mgr.is_connected(1));
 
-        let result = mgr.attempt_reconnect(1).await;
-        assert!(result.is_ok());
-        assert!(mgr.is_connected(1));
+            let result = mgr.attempt_reconnect(1).await;
+            assert!(result.is_ok());
+            assert!(mgr.is_connected(1));
 
-        mgr.route(1, &send_frame("hello")).await.unwrap();
-        let sent = mock.sent_data();
-        assert_eq!(sent.len(), 1);
+            mgr.route(1, &send_frame("hello")).await.unwrap();
+            let sent = mock.sent_data();
+            assert_eq!(sent.len(), 1);
+        });
     }
 
     // ─── Multi-node Tests ─────────────────────────────────────────
 
-    #[monoio::test(enable_timer = true)]
-    async fn full_mesh_three_nodes() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn full_mesh_three_nodes() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.connect(2, test_addr(4002)).await.unwrap();
-        mgr.connect(3, test_addr(4003)).await.unwrap();
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.connect(2, test_addr(4002)).await.unwrap();
+            mgr.connect(3, test_addr(4003)).await.unwrap();
 
-        assert_eq!(mgr.connection_count(), 3);
-        assert!(mgr.is_connected(1));
-        assert!(mgr.is_connected(2));
-        assert!(mgr.is_connected(3));
-        assert_eq!(mock.connect_count(), 3);
+            assert_eq!(mgr.connection_count(), 3);
+            assert!(mgr.is_connected(1));
+            assert!(mgr.is_connected(2));
+            assert!(mgr.is_connected(3));
+            assert_eq!(mock.connect_count(), 3);
 
-        mgr.route(1, &heartbeat_frame()).await.unwrap();
-        mgr.route(2, &heartbeat_frame()).await.unwrap();
-        mgr.route(3, &heartbeat_frame()).await.unwrap();
+            mgr.route(1, &heartbeat_frame()).await.unwrap();
+            mgr.route(2, &heartbeat_frame()).await.unwrap();
+            mgr.route(3, &heartbeat_frame()).await.unwrap();
 
-        assert_eq!(mock.sent_data().len(), 3);
+            assert_eq!(mock.sent_data().len(), 3);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn concurrent_route_to_multiple_nodes() {
-        let setup = MockSetup::new();
-        let (mut mgr, mock) = setup.manager();
+    #[test]
+    fn concurrent_route_to_multiple_nodes() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.connect(2, test_addr(4002)).await.unwrap();
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.connect(2, test_addr(4002)).await.unwrap();
 
-        mgr.route(1, &send_frame("msg_to_1")).await.unwrap();
-        mgr.route(2, &send_frame("msg_to_2")).await.unwrap();
-        mgr.route(1, &send_frame("another_to_1")).await.unwrap();
+            mgr.route(1, &send_frame("msg_to_1")).await.unwrap();
+            mgr.route(2, &send_frame("msg_to_2")).await.unwrap();
+            mgr.route(1, &send_frame("another_to_1")).await.unwrap();
 
-        let sent = mock.sent_data();
-        assert_eq!(sent.len(), 3);
+            let sent = mock.sent_data();
+            assert_eq!(sent.len(), 3);
 
-        let payloads: Vec<String> = sent
-            .iter()
-            .map(|data| {
-                let frame = Frame::decode(data).unwrap();
-                frame.payload.as_str().unwrap().to_string()
-            })
-            .collect();
-        assert!(payloads.contains(&"msg_to_1".to_string()));
-        assert!(payloads.contains(&"msg_to_2".to_string()));
-        assert!(payloads.contains(&"another_to_1".to_string()));
+            let payloads: Vec<String> = sent
+                .iter()
+                .map(|data| {
+                    let frame = Frame::decode(data).unwrap();
+                    frame.payload.as_str().unwrap().to_string()
+                })
+                .collect();
+            assert!(payloads.contains(&"msg_to_1".to_string()));
+            assert!(payloads.contains(&"msg_to_2".to_string()));
+            assert!(payloads.contains(&"another_to_1".to_string()));
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn connection_count() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn connection_count() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        assert_eq!(mgr.connection_count(), 0);
+            assert_eq!(mgr.connection_count(), 0);
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        assert_eq!(mgr.connection_count(), 1);
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            assert_eq!(mgr.connection_count(), 1);
 
-        mgr.connect(2, test_addr(4002)).await.unwrap();
-        assert_eq!(mgr.connection_count(), 2);
+            mgr.connect(2, test_addr(4002)).await.unwrap();
+            assert_eq!(mgr.connection_count(), 2);
 
-        mgr.connect(3, test_addr(4003)).await.unwrap();
-        assert_eq!(mgr.connection_count(), 3);
+            mgr.connect(3, test_addr(4003)).await.unwrap();
+            assert_eq!(mgr.connection_count(), 3);
 
-        mgr.disconnect(2).await.unwrap();
-        assert_eq!(mgr.connection_count(), 2);
+            mgr.disconnect(2).await.unwrap();
+            assert_eq!(mgr.connection_count(), 2);
 
-        mgr.disconnect(1).await.unwrap();
-        mgr.disconnect(3).await.unwrap();
-        assert_eq!(mgr.connection_count(), 0);
+            mgr.disconnect(1).await.unwrap();
+            mgr.disconnect(3).await.unwrap();
+            assert_eq!(mgr.connection_count(), 0);
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn drain_connections_closes_all() {
-        let setup = MockSetup::new();
-        let (mut mgr, _mock) = setup.manager();
+    #[test]
+    fn drain_connections_closes_all() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let setup = MockSetup::new();
+            let (mut mgr, _mock) = setup.manager();
 
-        mgr.connect(1, test_addr(4001)).await.unwrap();
-        mgr.connect(2, test_addr(4002)).await.unwrap();
-        mgr.connect(3, test_addr(4003)).await.unwrap();
+            mgr.connect(1, test_addr(4001)).await.unwrap();
+            mgr.connect(2, test_addr(4002)).await.unwrap();
+            mgr.connect(3, test_addr(4003)).await.unwrap();
 
-        let closed = mgr.drain_connections().await;
-        assert_eq!(closed, 3);
-        assert_eq!(mgr.connection_count(), 0);
-        assert!(!mgr.is_connected(1));
-        assert!(!mgr.is_connected(2));
-        assert!(!mgr.is_connected(3));
+            let closed = mgr.drain_connections().await;
+            assert_eq!(closed, 3);
+            assert_eq!(mgr.connection_count(), 0);
+            assert!(!mgr.is_connected(1));
+            assert!(!mgr.is_connected(2));
+            assert!(!mgr.is_connected(3));
+        });
     }
 }

@@ -182,23 +182,29 @@ mod tests {
         assert_ne!(hash1, hash2);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn quic_transport_listen_returns_stub_error() {
-        let (cert, key, _) = generate_self_signed_cert();
-        let transport = QuicTransport::new(cert, key);
-        let result = transport
-            .listen("127.0.0.1:0".parse().unwrap())
-            .await;
-        assert!(result.is_err());
+    #[test]
+    fn quic_transport_listen_returns_stub_error() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let (cert, key, _) = generate_self_signed_cert();
+            let transport = QuicTransport::new(cert, key);
+            let result = transport
+                .listen("127.0.0.1:0".parse().unwrap())
+                .await;
+            assert!(result.is_err());
+        });
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn quic_transport_connect_returns_stub_error() {
-        let (cert, key, hash) = generate_self_signed_cert();
-        let transport = QuicTransport::new(cert, key);
-        let result = transport
-            .connect("127.0.0.1:4000".parse().unwrap(), hash)
-            .await;
-        assert!(result.is_err());
+    #[test]
+    fn quic_transport_connect_returns_stub_error() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let (cert, key, hash) = generate_self_signed_cert();
+            let transport = QuicTransport::new(cert, key);
+            let result = transport
+                .connect("127.0.0.1:4000".parse().unwrap(), hash)
+                .await;
+            assert!(result.is_err());
+        });
     }
 }

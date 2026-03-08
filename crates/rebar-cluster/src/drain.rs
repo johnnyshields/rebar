@@ -52,7 +52,7 @@ impl NodeDrain {
     /// Phase 1: Announce departure to the cluster.
     /// - Broadcasts Leave via SWIM gossip
     /// - Unregisters all names from the registry
-    /// Returns the number of names unregistered.
+    ///   Returns the number of names unregistered.
     pub fn announce(
         &self,
         node_id: u64,
@@ -89,7 +89,7 @@ impl NodeDrain {
 
             let remaining = self.config.drain_timeout - start.elapsed();
 
-            match monoio::time::timeout(remaining, remote_rx.recv()).await {
+            match rebar_core::time::timeout(remaining, remote_rx.recv()).await {
                 Ok(Some(crate::router::RouterCommand::Send { node_id, frame })) => {
                     let _ = connection_manager.route(node_id, &frame).await;
                     drained += 1;
@@ -106,6 +106,7 @@ impl NodeDrain {
     }
 
     /// Execute the full three-phase drain protocol.
+    #[allow(clippy::too_many_arguments)]
     pub async fn drain<C: TransportConnector>(
         &self,
         node_id: u64,
@@ -259,140 +260,152 @@ mod tests {
         assert!(registry.lookup("service_b").is_none());
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn drain_waits_for_inflight() {
-        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
-        let mut mgr = ConnectionManager::new(NullConnector);
-        mgr.connect(2, test_addr()).await.unwrap();
+    #[test]
+    fn drain_waits_for_inflight() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let mut mgr = ConnectionManager::new(NullConnector);
+            mgr.connect(2, test_addr()).await.unwrap();
 
-        for i in 0..3 {
+            for i in 0..3 {
+                tx.send(RouterCommand::Send {
+                    node_id: 2,
+                    frame: Frame {
+                        version: 1,
+                        msg_type: MsgType::Send,
+                        request_id: i,
+                        header: rmpv::Value::Nil,
+                        payload: rmpv::Value::Nil,
+                    },
+                })
+                .unwrap();
+            }
+            drop(tx);
+
+            let drain = NodeDrain::new(DrainConfig {
+                drain_timeout: Duration::from_secs(5),
+                ..DrainConfig::default()
+            });
+
+            let (count, timed_out) = drain.drain_outbound(&mut rx, &mut mgr).await;
+            assert_eq!(count, 3);
+            assert!(!timed_out);
+        });
+    }
+
+    #[test]
+    fn drain_respects_timeout() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let mut mgr = ConnectionManager::new(NullConnector);
+
+            let drain = NodeDrain::new(DrainConfig {
+                drain_timeout: Duration::from_millis(100),
+                ..DrainConfig::default()
+            });
+
+            let start = Instant::now();
+            let (count, timed_out) = drain.drain_outbound(&mut rx, &mut mgr).await;
+            let elapsed = start.elapsed();
+
+            assert_eq!(count, 0);
+            assert!(timed_out);
+            assert!(elapsed >= Duration::from_millis(100));
+            assert!(elapsed < Duration::from_secs(2));
+
+            drop(tx);
+        });
+    }
+
+    #[test]
+    fn full_drain_protocol() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let mut gossip = GossipQueue::new();
+            let mut registry = Registry::new();
+            registry.register("svc", ProcessId::new(1, 0, 1), 1, 100);
+
+            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            let mut mgr = ConnectionManager::new(NullConnector);
+            mgr.connect(2, test_addr()).await.unwrap();
+
             tx.send(RouterCommand::Send {
                 node_id: 2,
                 frame: Frame {
                     version: 1,
                     msg_type: MsgType::Send,
-                    request_id: i,
+                    request_id: 0,
                     header: rmpv::Value::Nil,
                     payload: rmpv::Value::Nil,
                 },
             })
             .unwrap();
-        }
-        drop(tx);
+            drop(tx);
 
-        let drain = NodeDrain::new(DrainConfig {
-            drain_timeout: Duration::from_secs(5),
-            ..DrainConfig::default()
+            let drain = NodeDrain::new(DrainConfig {
+                announce_timeout: Duration::from_millis(100),
+                drain_timeout: Duration::from_secs(1),
+                shutdown_timeout: Duration::from_millis(100),
+            });
+
+            let result = drain
+                .drain(
+                    1,
+                    test_addr(),
+                    &mut gossip,
+                    &mut registry,
+                    &mut rx,
+                    &mut mgr,
+                    5,
+                )
+                .await;
+
+            assert_eq!(result.messages_drained, 1);
+            assert_eq!(result.processes_stopped, 5);
+            assert!(!result.timed_out);
+            assert!(registry.lookup("svc").is_none());
+
+            let updates = gossip.drain(10);
+            assert!(
+                updates
+                    .iter()
+                    .any(|u| matches!(u, GossipUpdate::Leave { node_id: 1, .. }))
+            );
+            assert_eq!(mgr.connection_count(), 0);
         });
-
-        let (count, timed_out) = drain.drain_outbound(&mut rx, &mut mgr).await;
-        assert_eq!(count, 3);
-        assert!(!timed_out);
     }
 
-    #[monoio::test(enable_timer = true)]
-    async fn drain_respects_timeout() {
-        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
-        let mut mgr = ConnectionManager::new(NullConnector);
+    #[test]
+    fn drain_returns_stats() {
+        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        ex.block_on(async {
+            let mut gossip = GossipQueue::new();
+            let mut registry = Registry::new();
+            let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
+            drop(tx);
+            let mut mgr = ConnectionManager::new(NullConnector);
 
-        let drain = NodeDrain::new(DrainConfig {
-            drain_timeout: Duration::from_millis(100),
-            ..DrainConfig::default()
+            let drain = NodeDrain::new(DrainConfig::default());
+            let result = drain
+                .drain(
+                    1,
+                    test_addr(),
+                    &mut gossip,
+                    &mut registry,
+                    &mut rx,
+                    &mut mgr,
+                    0,
+                )
+                .await;
+
+            for d in &result.phase_durations {
+                assert!(*d >= Duration::ZERO);
+            }
+            assert_eq!(result.messages_drained, 0);
+            assert_eq!(result.processes_stopped, 0);
+            assert!(!result.timed_out);
         });
-
-        let start = Instant::now();
-        let (count, timed_out) = drain.drain_outbound(&mut rx, &mut mgr).await;
-        let elapsed = start.elapsed();
-
-        assert_eq!(count, 0);
-        assert!(timed_out);
-        assert!(elapsed >= Duration::from_millis(100));
-        assert!(elapsed < Duration::from_secs(2));
-
-        drop(tx);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn full_drain_protocol() {
-        let mut gossip = GossipQueue::new();
-        let mut registry = Registry::new();
-        registry.register("svc", ProcessId::new(1, 0, 1), 1, 100);
-
-        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
-        let mut mgr = ConnectionManager::new(NullConnector);
-        mgr.connect(2, test_addr()).await.unwrap();
-
-        tx.send(RouterCommand::Send {
-            node_id: 2,
-            frame: Frame {
-                version: 1,
-                msg_type: MsgType::Send,
-                request_id: 0,
-                header: rmpv::Value::Nil,
-                payload: rmpv::Value::Nil,
-            },
-        })
-        .unwrap();
-        drop(tx);
-
-        let drain = NodeDrain::new(DrainConfig {
-            announce_timeout: Duration::from_millis(100),
-            drain_timeout: Duration::from_secs(1),
-            shutdown_timeout: Duration::from_millis(100),
-        });
-
-        let result = drain
-            .drain(
-                1,
-                test_addr(),
-                &mut gossip,
-                &mut registry,
-                &mut rx,
-                &mut mgr,
-                5,
-            )
-            .await;
-
-        assert_eq!(result.messages_drained, 1);
-        assert_eq!(result.processes_stopped, 5);
-        assert!(!result.timed_out);
-        assert!(registry.lookup("svc").is_none());
-
-        let updates = gossip.drain(10);
-        assert!(
-            updates
-                .iter()
-                .any(|u| matches!(u, GossipUpdate::Leave { node_id: 1, .. }))
-        );
-        assert_eq!(mgr.connection_count(), 0);
-    }
-
-    #[monoio::test(enable_timer = true)]
-    async fn drain_returns_stats() {
-        let mut gossip = GossipQueue::new();
-        let mut registry = Registry::new();
-        let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
-        drop(tx);
-        let mut mgr = ConnectionManager::new(NullConnector);
-
-        let drain = NodeDrain::new(DrainConfig::default());
-        let result = drain
-            .drain(
-                1,
-                test_addr(),
-                &mut gossip,
-                &mut registry,
-                &mut rx,
-                &mut mgr,
-                0,
-            )
-            .await;
-
-        for d in &result.phase_durations {
-            assert!(*d >= Duration::ZERO);
-        }
-        assert_eq!(result.messages_drained, 0);
-        assert_eq!(result.processes_stopped, 0);
-        assert!(!result.timed_out);
     }
 }
