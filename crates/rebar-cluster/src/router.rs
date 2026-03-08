@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn distributed_router_routes_remote() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let table = Rc::new(ProcessTable::new(1, 0));
             let (remote_tx, mut remote_rx) = local_sync::mpsc::unbounded::channel();

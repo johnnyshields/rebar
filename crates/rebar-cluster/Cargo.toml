@@ -21,3 +21,4 @@ rand = "0.9"
 sha2 = "0.10"
 
 [dev-dependencies]
+rebar-core = { path = "../rebar-core", features = ["testing"] }

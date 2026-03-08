@@ -9,3 +9,6 @@ pub mod runtime;
 pub mod supervisor;
 pub(crate) mod task;
 pub mod time;
+
+#[cfg(feature = "testing")]
+pub mod testing;

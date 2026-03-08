@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn quic_transport_listen_returns_stub_error() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let (cert, key, _) = generate_self_signed_cert();
             let transport = QuicTransport::new(cert, key);
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn quic_transport_connect_returns_stub_error() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let (cert, key, hash) = generate_self_signed_cert();
             let transport = QuicTransport::new(cert, key);

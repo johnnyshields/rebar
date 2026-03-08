@@ -280,9 +280,10 @@ impl TcpStream {
     pub async fn read_exact(&self, mut buf: Vec<u8>) -> BufResult<(), Vec<u8>> {
         let total = buf.len();
         let mut filled = 0;
+        let mut tmp = vec![0u8; total];
         while filled < total {
-            let slice = vec![0u8; total - filled];
-            let BufResult(result, returned) = self.read(slice).await;
+            tmp.resize(total - filled, 0);
+            let BufResult(result, returned) = self.read(tmp).await;
             match result {
                 Ok(0) => {
                     return BufResult(
@@ -296,6 +297,7 @@ impl TcpStream {
                 Ok(n) => {
                     buf[filled..filled + n].copy_from_slice(&returned[..n]);
                     filled += n;
+                    tmp = returned;
                 }
                 Err(e) => return BufResult(Err(e), buf),
             }
@@ -461,23 +463,7 @@ mod tests {
                 result.unwrap();
             });
 
-            // Connect from the "client" side using a raw socket.
-            let client_sock =
-                Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-            client_sock.set_nonblocking(true).unwrap();
-            // Non-blocking connect may return WouldBlock/InProgress.
-            let _ = client_sock.connect(&addr.into());
-            let client_fd = OwnedFd::from(client_sock);
-            executor::with_executor(|ex| {
-                ex.proactor().borrow_mut().attach(client_fd.as_raw_fd())
-            })
-            .unwrap();
-            let client = TcpStream {
-                fd: SharedFd::new(client_fd),
-            };
-
-            // Give the accept a chance to complete by yielding.
-            crate::executor::spawn(async {}).await.unwrap();
+            let client = TcpStream::connect(addr).await.unwrap();
 
             // Write a message.
             let msg = b"hello".to_vec();
@@ -516,20 +502,7 @@ mod tests {
             });
 
             // Client: connect, write, read echo.
-            let client_sock =
-                Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-            client_sock.set_nonblocking(true).unwrap();
-            let _ = client_sock.connect(&addr.into());
-            let client_fd = OwnedFd::from(client_sock);
-            executor::with_executor(|ex| {
-                ex.proactor().borrow_mut().attach(client_fd.as_raw_fd())
-            })
-            .unwrap();
-            let client = TcpStream {
-                fd: SharedFd::new(client_fd),
-            };
-
-            crate::executor::spawn(async {}).await.unwrap();
+            let client = TcpStream::connect(addr).await.unwrap();
 
             let msg = b"hello leased".to_vec();
             let BufResult(result, _) = client.write(msg).await;

@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn distributed_runtime_local_send() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let mgr = ConnectionManager::new(MockConnector);
             let drt = DistributedRuntime::new(1, mgr);
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn distributed_runtime_inbound_delivery() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let mgr = ConnectionManager::new(MockConnector);
             let drt = DistributedRuntime::new(2, mgr);

@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn connect_and_send_frame() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn bidirectional_echo() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn multiple_frames_sequential() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn large_frame() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn recv_after_close_returns_error() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn connect_to_invalid_address_returns_error() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let result = transport.connect("127.0.0.1:1".parse().unwrap()).await;
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn listener_local_addr() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn high_throughput() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let transport = TcpTransport::new();
             let listener = transport

@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn connect_to_new_node() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn route_frame_to_connected_node() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn route_to_unknown_node_returns_error() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn disconnect_node() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn reconnect_after_disconnect() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn on_node_discovered_connects() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn on_node_discovered_idempotent() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn on_connection_lost_fires_node_down() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn on_connection_lost_triggers_reconnect() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn exponential_backoff_timing() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let policy = ReconnectPolicy {
                 base_delay: Duration::from_secs(1),
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn max_backoff_capped() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let policy = ReconnectPolicy {
                 base_delay: Duration::from_secs(1),
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn reconnect_succeeds_restores_routing() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn full_mesh_three_nodes() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn concurrent_route_to_multiple_nodes() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, mock) = setup.manager();
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn connection_count() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn drain_connections_closes_all() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let setup = MockSetup::new();
             let (mut mgr, _mock) = setup.manager();

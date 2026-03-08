@@ -117,7 +117,7 @@ fn pid(node: u64, local: u64) -> ProcessId {
 /// After the exchange, both membership lists see the other node as Alive.
 #[test]
 fn two_nodes_discover_via_swim() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     // Node A (id=1) starts with itself in its membership list
     let mut list_a = MembershipList::new();
@@ -201,7 +201,7 @@ fn two_nodes_discover_via_swim() {
 /// send a frame, and verify node B receives it correctly.
 #[test]
 fn send_message_across_nodes() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     let transport = TcpTransport::new();
 
@@ -254,7 +254,7 @@ fn send_message_across_nodes() {
 /// 4. Node A verifies the ProcessDown frame.
 #[test]
 fn remote_process_monitor_fires_on_exit() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     let transport = TcpTransport::new();
 
@@ -337,7 +337,7 @@ fn remote_process_monitor_fires_on_exit() {
 /// and resolve it to the correct PID.
 #[test]
 fn registry_name_resolves_across_nodes() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     let mut reg_a = Registry::new();
     let mut reg_b = Registry::new();
@@ -387,7 +387,7 @@ fn registry_name_resolves_across_nodes() {
 /// trigger on_connection_lost. Verify the NodeDown event is emitted.
 #[test]
 fn node_down_fires_when_node_disconnects() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     let connector = Rc::new(MockConnector::new());
     let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
@@ -419,7 +419,7 @@ fn node_down_fires_when_node_disconnects() {
 /// to restore the connection. Verify the node is connected again afterward.
 #[test]
 fn reconnection_after_transient_failure() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     let connector = Rc::new(MockConnector::new());
     let mut mgr = ConnectionManager::new(RcConnector(connector.clone()));
@@ -453,7 +453,7 @@ fn reconnection_after_transient_failure() {
 /// Each node connects to the other two. Verify each has connection_count() == 2.
 #[test]
 fn three_node_mesh_all_connected() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     // Create three independent ConnectionManagers (one per node)
     let connector_1 = Rc::new(MockConnector::new());
@@ -513,7 +513,7 @@ fn three_node_mesh_all_connected() {
 /// End-to-end: two DistributedRuntimes send messages via TCP transport.
 #[test]
 fn end_to_end_cross_node_send_via_tcp() {
-    let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+    let ex = rebar_core::testing::test_executor();
     ex.block_on(async {
     struct TcpConnector;
 

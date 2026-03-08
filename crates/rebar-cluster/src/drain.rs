@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn drain_waits_for_inflight() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
             let mut mgr = ConnectionManager::new(NullConnector);
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn drain_respects_timeout() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let (tx, mut rx) = local_sync::mpsc::unbounded::channel::<RouterCommand>();
             let mut mgr = ConnectionManager::new(NullConnector);
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn full_drain_protocol() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let mut gossip = GossipQueue::new();
             let mut registry = Registry::new();
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn drain_returns_stats() {
-        let ex = rebar_core::executor::RebarExecutor::new(rebar_core::executor::ExecutorConfig::default()).unwrap();
+        let ex = rebar_core::testing::test_executor();
         ex.block_on(async {
             let mut gossip = GossipQueue::new();
             let mut registry = Registry::new();

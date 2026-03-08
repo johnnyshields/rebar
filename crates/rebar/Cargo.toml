@@ -14,3 +14,4 @@ crossbeam-channel = "0.5"
 rmpv = "1"
 
 [dev-dependencies]
+rebar-core = { path = "../rebar-core", features = ["testing"] }
