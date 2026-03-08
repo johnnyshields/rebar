@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use compio_buf::IntoInner;
+use compio_buf::{IoBuf, IoBufMut, IntoInner};
 use compio_driver::op;
 use compio_driver::{Key, PushEntry, SharedFd};
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
@@ -416,6 +416,69 @@ impl TcpStream {
     }
 }
 
+// ---------------------------------------------------------------------------
+// compio-io trait implementations for ecosystem interop
+// ---------------------------------------------------------------------------
+
+// Implement on `&TcpStream` first — SharedFd is stateless so `&self` is safe.
+// This also satisfies `for<'a> &'a TcpStream: AsyncRead + AsyncWrite` which
+// compio-tls requires for `TlsAcceptor::accept`.
+
+impl compio_io::AsyncRead for &TcpStream {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        let recv_op = op::Recv::new(self.fd.clone(), buf, 0);
+        let BufResult(result, completed_op) = submit(recv_op).await;
+        let mut buf = completed_op.into_inner();
+        // The kernel wrote bytes but the driver doesn't update the buffer length.
+        if let Ok(n) = &result {
+            unsafe { compio_buf::SetLen::set_len(&mut buf, *n); }
+        }
+        BufResult(result, buf)
+    }
+}
+
+impl compio_io::AsyncWrite for &TcpStream {
+    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        let send_op = op::Send::new(self.fd.clone(), buf, 0);
+        let BufResult(result, completed_op) = submit(send_op).await;
+        BufResult(result, completed_op.into_inner())
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        // TCP doesn't buffer — nothing to flush.
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        // Shutdown the write half. This is a non-blocking syscall, not an I/O
+        // operation, so a synchronous call via SockRef is appropriate.
+        SockRef::from(&*self.fd).shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    }
+}
+
+// Delegate owned impls to the `&TcpStream` impls.
+
+impl compio_io::AsyncRead for TcpStream {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        compio_io::AsyncRead::read(&mut &*self, buf).await
+    }
+}
+
+impl compio_io::AsyncWrite for TcpStream {
+    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        compio_io::AsyncWrite::write(&mut &*self, buf).await
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        compio_io::AsyncWrite::flush(&mut &*self).await
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        compio_io::AsyncWrite::shutdown(&mut &*self).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +638,83 @@ mod tests {
             let BufResult(result, buf) = client.read_exact(buf).await;
             result.unwrap();
             assert_eq!(&buf, b" world!!");
+
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn async_read_write_trait_echo() {
+        use compio_io::{AsyncRead, AsyncWrite};
+
+        let ex = test_executor();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let echo = crate::executor::spawn(async move {
+                let (mut stream, _peer) = listener.accept().await.unwrap();
+                let buf = Vec::with_capacity(64);
+                let BufResult(result, buf) = AsyncRead::read(&mut stream, buf).await;
+                let n = result.unwrap();
+                let data = buf[..n].to_vec();
+                let BufResult(result, _) = AsyncWrite::write(&mut stream, data).await;
+                result.unwrap();
+            });
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+
+            let msg = b"trait echo".to_vec();
+            let BufResult(result, _) = AsyncWrite::write(&mut client, msg).await;
+            result.unwrap();
+
+            let buf = Vec::with_capacity(64);
+            let BufResult(result, buf) = AsyncRead::read(&mut client, buf).await;
+            let n = result.unwrap();
+            assert_eq!(&buf[..n], b"trait echo");
+
+            echo.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn async_write_flush_returns_ok() {
+        use compio_io::AsyncWrite;
+
+        let ex = test_executor();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let _server = crate::executor::spawn(async move {
+                let _ = listener.accept().await;
+            });
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            assert!(AsyncWrite::flush(&mut client).await.is_ok());
+        });
+    }
+
+    #[test]
+    fn async_write_shutdown_causes_peer_eof() {
+        use compio_io::{AsyncRead, AsyncWrite};
+
+        let ex = test_executor();
+        ex.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = crate::executor::spawn(async move {
+                let (mut stream, _peer) = listener.accept().await.unwrap();
+                // Read should return 0 (EOF) after client shuts down write half.
+                let buf = Vec::with_capacity(64);
+                let BufResult(result, _) = AsyncRead::read(&mut stream, buf).await;
+                let n = result.unwrap();
+                assert_eq!(n, 0, "expected EOF after shutdown");
+            });
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            AsyncWrite::shutdown(&mut client).await.unwrap();
 
             server.await.unwrap();
         });
