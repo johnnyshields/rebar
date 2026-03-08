@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -421,18 +420,18 @@ struct PanicGuard {
     msg_tx: local_mpsc::Tx<SupervisorMsg>,
     child_id: String,
     pid: ProcessId,
-    armed: Cell<bool>,
+    armed: bool,
 }
 
 impl PanicGuard {
-    fn disarm(&self) {
-        self.armed.set(false);
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for PanicGuard {
     fn drop(&mut self) {
-        if self.armed.get() {
+        if self.armed {
             let _ = self.msg_tx.send(SupervisorMsg::ChildExited {
                 child_id: self.child_id.clone(),
                 pid: self.pid,
@@ -461,11 +460,11 @@ fn start_child(
     child.shutdown_tx = Some(shutdown_tx);
 
     let handle = crate::executor::spawn(async move {
-        let guard = PanicGuard {
+        let mut guard = PanicGuard {
             msg_tx: msg_tx.clone(),
             child_id: child_id.clone(),
             pid,
-            armed: Cell::new(true),
+            armed: true,
         };
 
         let child_future = factory();

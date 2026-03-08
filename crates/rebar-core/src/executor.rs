@@ -509,6 +509,23 @@ mod tests {
     }
 
     #[test]
+    fn detached_task_panic_does_not_crash_executor() {
+        let ex = test_executor();
+        let result = ex.block_on(async {
+            // Spawn a detached task that panics
+            spawn(async { panic!("boom") }).detach();
+
+            // Give the panicking task a chance to run
+            sleep(Duration::from_millis(10)).await;
+
+            // Spawn a normal task to prove the executor is still alive
+            let normal = spawn(async { 42 });
+            normal.await.unwrap()
+        });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
     fn join_handle_returns_error_on_panic() {
         let ex = test_executor();
         ex.block_on(async {

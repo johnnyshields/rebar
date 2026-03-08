@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -257,18 +256,18 @@ async fn dynamic_supervisor_loop(
 struct DynPanicGuard {
     msg_tx: local_mpsc::Tx<DynSupervisorMsg>,
     pid: ProcessId,
-    armed: Cell<bool>,
+    armed: bool,
 }
 
 impl DynPanicGuard {
-    fn disarm(&self) {
-        self.armed.set(false);
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for DynPanicGuard {
     fn drop(&mut self) {
-        if self.armed.get() {
+        if self.armed {
             let _ = self.msg_tx.send(DynSupervisorMsg::ChildExited {
                 pid: self.pid,
                 reason: ExitReason::Abnormal("panicked".into()),
@@ -288,10 +287,10 @@ fn spawn_dyn_child(
     let msg_tx = msg_tx.clone();
 
     let handle = crate::executor::spawn(async move {
-        let guard = DynPanicGuard {
+        let mut guard = DynPanicGuard {
             msg_tx: msg_tx.clone(),
             pid,
-            armed: Cell::new(true),
+            armed: true,
         };
 
         let child_future = factory();
@@ -330,6 +329,8 @@ mod tests {
     use crate::supervisor::spec::ShutdownStrategy;
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn test_executor() -> RebarExecutor {
@@ -736,6 +737,43 @@ mod tests {
 
             let counts = handle.count_children().await.unwrap();
             assert_eq!(counts.active, 0);
+
+            handle.shutdown();
+        });
+    }
+
+    #[test]
+    fn dyn_supervisor_restarts_panicked_child() {
+        test_executor().block_on(async {
+            let rt = Runtime::new(1);
+            let sc = Arc::new(AtomicU32::new(0));
+            let scc = Arc::clone(&sc);
+
+            let spec = DynamicSupervisorSpec::new()
+                .max_restarts(5)
+                .max_seconds(10);
+            let handle = start_dynamic_supervisor(&rt, spec);
+
+            let entry = ChildEntry::new(
+                ChildSpec::new("panicker").restart(RestartType::Permanent),
+                move || {
+                    let s = Arc::clone(&scc);
+                    async move {
+                        let count = s.fetch_add(1, Ordering::SeqCst);
+                        if count == 0 {
+                            panic!("first run panics");
+                        }
+                        // Second run succeeds and stays alive
+                        crate::time::sleep(Duration::from_secs(60)).await;
+                        ExitReason::Normal
+                    }
+                },
+            );
+            handle.start_child(entry).await.unwrap();
+
+            crate::time::sleep(Duration::from_millis(500)).await;
+            // Should have run twice: first panicked, then restarted
+            assert_eq!(sc.load(Ordering::SeqCst), 2);
 
             handle.shutdown();
         });
