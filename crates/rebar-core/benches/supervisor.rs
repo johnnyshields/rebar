@@ -55,7 +55,7 @@ fn bench_supervisor_startup(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: dynamic add_child on running supervisor
+/// Benchmark: dynamic add_child on running supervisor (one at a time)
 fn bench_add_child(c: &mut Criterion) {
     let mut group = c.benchmark_group("supervisor/add_child");
 
@@ -82,6 +82,47 @@ fn bench_add_child(c: &mut Criterion) {
                             );
                             handle.add_child(entry).await.unwrap();
                         }
+
+                        handle.shutdown();
+                        task::yield_now().await;
+                    });
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Benchmark: batch add_children on running supervisor
+fn bench_add_children_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("supervisor/add_children_batch");
+
+    for count in [1, 10, 50] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(count),
+            &count,
+            |b, &count| {
+                let tokio_rt = tokio_rt();
+                b.iter(|| {
+                    tokio_rt.block_on(async {
+                        let rt = Arc::new(Runtime::new(1));
+                        let spec = SupervisorSpec::new(RestartStrategy::OneForOne);
+                        let handle = start_supervisor(rt, spec, vec![]).await;
+
+                        let entries: Vec<ChildEntry> = (0..count)
+                            .map(|i| {
+                                ChildEntry::new(
+                                    ChildSpec::new(format!("batch-{}", i)),
+                                    || async {
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                        ExitReason::Normal
+                                    },
+                                )
+                            })
+                            .collect();
+
+                        handle.add_children(entries).await;
 
                         handle.shutdown();
                         task::yield_now().await;
@@ -150,6 +191,7 @@ criterion_group!(
     benches,
     bench_supervisor_startup,
     bench_add_child,
+    bench_add_children_batch,
     bench_restart_one_for_one
 );
 criterion_main!(benches);
