@@ -59,7 +59,7 @@ impl GenServerContext {
 /// - `Cast`: asynchronous fire-and-forget message
 /// - `Reply`: response to a Call
 #[async_trait::async_trait]
-pub trait GenServer: Send + 'static {
+pub trait GenServer: Send + Sync + 'static {
     type State: Send + 'static;
     type Call: Send + 'static;
     type Cast: Send + 'static;
