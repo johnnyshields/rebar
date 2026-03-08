@@ -322,3 +322,60 @@ async fn concurrent_spawn_from_multiple_tasks() {
 
     assert_eq!(pids.len(), 5, "expected 5 unique PIDs from concurrent spawns");
 }
+
+// === GenServer API contracts ===
+
+#[test]
+fn gen_server_context_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<rebar_core::gen_server::GenServerContext>();
+}
+
+#[test]
+fn call_error_has_timeout_and_server_dead_variants() {
+    let err = rebar_core::gen_server::CallError::Timeout;
+    match err {
+        rebar_core::gen_server::CallError::Timeout => {}
+        rebar_core::gen_server::CallError::ServerDead => {}
+    }
+}
+
+// === DynamicSupervisor API contracts ===
+
+#[test]
+fn dynamic_supervisor_handle_is_clone_send() {
+    fn assert_clone_send<T: Clone + Send>() {}
+    assert_clone_send::<rebar_core::supervisor::DynamicSupervisorHandle>();
+}
+
+#[test]
+fn dynamic_supervisor_spec_builder_pattern() {
+    let spec = rebar_core::supervisor::DynamicSupervisorSpec::new()
+        .max_restarts(10)
+        .max_seconds(60);
+    let _ = spec;
+}
+
+// === RuntimeBuilder API contracts ===
+
+#[test]
+fn runtime_builder_new_takes_node_id() {
+    let _builder = rebar_core::runtime::RuntimeBuilder::new(1);
+}
+
+#[test]
+fn runtime_builder_has_worker_threads() {
+    let _builder = rebar_core::runtime::RuntimeBuilder::new(1).worker_threads(4);
+}
+
+#[test]
+fn runtime_builder_has_thread_name() {
+    let _builder = rebar_core::runtime::RuntimeBuilder::new(1).thread_name("test");
+}
+
+#[test]
+fn runtime_builder_build_returns_pair() {
+    let (tokio_rt, rebar_rt) = rebar_core::runtime::RuntimeBuilder::new(1).build().unwrap();
+    assert_eq!(rebar_rt.node_id(), 1);
+    drop(tokio_rt);
+}
