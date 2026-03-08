@@ -66,11 +66,11 @@ where
 
     let mut threads = Vec::with_capacity(num_threads);
 
-    for thread_idx in 0..num_threads {
+    for (thread_idx, receiver_slot) in receivers.iter_mut().enumerate() {
         let thread_id = thread_idx as u16;
         let senders = Arc::clone(&senders);
         let eventfds = Arc::clone(&eventfds);
-        let local_rx = receivers[thread_idx].take().unwrap();
+        let local_rx = receiver_slot.take().unwrap();
         let shutdown = Arc::clone(&shutdown);
         let init_fn = init_fn.clone();
 

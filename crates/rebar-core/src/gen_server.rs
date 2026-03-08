@@ -135,10 +135,10 @@ pub trait GenServer: 'static {
 fn extract_gs_type(value: &rmpv::Value) -> Option<&str> {
     if let rmpv::Value::Map(pairs) = value {
         for (k, v) in pairs {
-            if let (rmpv::Value::String(key), rmpv::Value::String(val)) = (k, v) {
-                if key.as_str() == Some("$gs") {
-                    return val.as_str();
-                }
+            if let (rmpv::Value::String(key), rmpv::Value::String(val)) = (k, v)
+                && key.as_str() == Some("$gs")
+            {
+                return val.as_str();
             }
         }
     }
@@ -148,10 +148,10 @@ fn extract_gs_type(value: &rmpv::Value) -> Option<&str> {
 fn extract_field(value: &rmpv::Value, field: &str) -> Option<rmpv::Value> {
     if let rmpv::Value::Map(pairs) = value {
         for (k, v) in pairs {
-            if let rmpv::Value::String(key) = k {
-                if key.as_str() == Some(field) {
-                    return Some(v.clone());
-                }
+            if let rmpv::Value::String(key) = k
+                && key.as_str() == Some(field)
+            {
+                return Some(v.clone());
             }
         }
     }
@@ -325,15 +325,14 @@ pub async fn call_from_runtime(
             match ctx.recv_timeout(timeout).await {
                 Some(msg) => {
                     let payload = msg.payload().clone();
-                    if extract_gs_type(&payload) == Some("reply") {
-                        if let Some(r) = extract_field(&payload, "ref").and_then(|v| v.as_u64()) {
-                            if r == ref_id {
-                                let val =
-                                    extract_field(&payload, "val").unwrap_or(rmpv::Value::Nil);
-                                let _ = tx.send(Ok(val));
-                                return;
-                            }
-                        }
+                    if extract_gs_type(&payload) == Some("reply")
+                        && let Some(r) = extract_field(&payload, "ref").and_then(|v| v.as_u64())
+                        && r == ref_id
+                    {
+                        let val =
+                            extract_field(&payload, "val").unwrap_or(rmpv::Value::Nil);
+                        let _ = tx.send(Ok(val));
+                        return;
                     }
                 }
                 None => {

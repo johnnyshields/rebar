@@ -436,7 +436,7 @@ mod tests {
             assert_eq!(received.payload().as_u64(), Some(1));
 
             // The send_async should now complete
-            send_handle.await;
+            send_handle.await.unwrap();
 
             // Verify the async-sent message is in the mailbox
             let received = rx.recv().await.unwrap();

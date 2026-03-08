@@ -12,6 +12,7 @@ use turbine_core::config::PoolConfig;
 use turbine_core::gc::NoopHooks;
 
 use crate::task::{self, JoinHandle, RawTask};
+pub use crate::task::JoinError;
 
 /// Configuration for the [`RebarExecutor`].
 pub struct ExecutorConfig {
@@ -68,7 +69,7 @@ impl RebarExecutor {
         let pool = match config.pool_config {
             Some(pool_config) => {
                 let p = IouringBufferPool::new(pool_config, NoopHooks)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| io::Error::other(e.to_string()))?;
                 Some(p)
             }
             None => None,
@@ -255,7 +256,7 @@ pub fn try_with_executor<R>(f: impl FnOnce(&RebarExecutor) -> R) -> Option<R> {
 /// Returns `None` if no executor is active or no pool is configured.
 /// The closure borrows the pool for a bounded scope within `block_on()`.
 pub fn with_buffer_pool<R>(f: impl FnOnce(&IouringBufferPool<NoopHooks>) -> R) -> Option<R> {
-    try_with_executor(|ex| ex.pool().map(|p| f(p))).flatten()
+    try_with_executor(|ex| ex.pool().map(f)).flatten()
 }
 
 /// Create a waker that sets the given flag to `true` when woken.
@@ -313,7 +314,7 @@ mod tests {
         let ex = test_executor();
         let result = ex.block_on(async {
             let handle = spawn(async { 10 + 32 });
-            handle.await
+            handle.await.unwrap()
         });
         assert_eq!(result, 42);
     }
@@ -325,7 +326,7 @@ mod tests {
             let a = spawn(async { 1 });
             let b = spawn(async { 2 });
             let c = spawn(async { 3 });
-            a.await + b.await + c.await
+            a.await.unwrap() + b.await.unwrap() + c.await.unwrap()
         });
         assert_eq!(result, 6);
     }
@@ -336,9 +337,9 @@ mod tests {
         let result = ex.block_on(async {
             let h = spawn(async {
                 let inner = spawn(async { 7 });
-                inner.await * 6
+                inner.await.unwrap() * 6
             });
-            h.await
+            h.await.unwrap()
         });
         assert_eq!(result, 42);
     }
@@ -363,7 +364,7 @@ mod tests {
                 }));
             }
             for h in handles {
-                h.await;
+                h.await.unwrap();
             }
         });
         let _ = result;
@@ -401,8 +402,8 @@ mod tests {
                 o2.borrow_mut().push(2);
             });
 
-            h1.await;
-            h2.await;
+            h1.await.unwrap();
+            h2.await.unwrap();
 
             let v = order.borrow().clone();
             v
@@ -490,5 +491,32 @@ mod tests {
             deadline: Instant::now() + duration,
             registered: Cell::new(false),
         }
+    }
+
+    #[test]
+    fn task_panic_does_not_crash_executor() {
+        let ex = test_executor();
+        let result = ex.block_on(async {
+            // Spawn a task that panics
+            let panicking = spawn(async { panic!("boom") });
+            let _ = panicking.await; // should return Err, not crash
+
+            // Spawn a normal task to prove the executor is still alive
+            let normal = spawn(async { 42 });
+            normal.await.unwrap()
+        });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn join_handle_returns_error_on_panic() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let handle = spawn(async { panic!("boom") });
+            match handle.await {
+                Err(crate::task::JoinError::Panicked(msg)) => assert_eq!(msg, "boom"),
+                other => panic!("expected Err(Panicked), got {:?}", other),
+            }
+        });
     }
 }

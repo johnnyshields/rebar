@@ -4,7 +4,9 @@
 
 Rebar is a distributed actor runtime for Rust, directly inspired by Erlang/OTP's BEAM virtual machine. It brings the battle-tested process model of BEAM -- lightweight processes, message passing, supervision trees, and transparent distribution -- into the Rust ecosystem, combining Erlang's fault-tolerance philosophy with Rust's memory safety and zero-cost abstractions.
 
-The project is organized into a layered crate architecture that enforces clean separation of concerns. At the foundation, `rebar-core` provides the local process runtime with zero networking dependencies: process spawning, mailbox-based message passing, a concurrent process table, and OTP-style supervisor trees. Built on top of that, `rebar-cluster` adds all distribution capabilities: a binary wire protocol, TCP transport, SWIM-based failure detection and membership gossip, a CRDT-based global name registry, and connection management with automatic reconnection. The `rebar` facade crate re-exports everything from both core and cluster through a single unified interface, while `rebar-ffi` exposes a C-ABI layer that enables embedding the runtime in Go, Python, TypeScript, and any other language with C FFI support.
+At the foundation, `rebar-core` provides the local process runtime built on a custom cooperative executor (`RebarExecutor`) using compio-driver for cross-platform async I/O and turbine-core for epoch-based buffer management. The runtime follows a thread-per-core model: `multi.rs` spawns N OS threads, each running its own `RebarExecutor`, `ProcessTable`, and `ThreadBridge`. All core types are `!Send` -- the runtime uses `Rc`, `RefCell`, and `Cell` instead of `Arc` on the hot path. Cross-thread communication goes through crossbeam channels + eventfd.
+
+The project is organized into a layered crate architecture that enforces clean separation of concerns. `rebar-core` provides process spawning, mailbox-based message passing, a thread-local process table, and OTP-style supervisor trees with zero networking dependencies. Built on top of that, `rebar-cluster` adds all distribution capabilities: a binary wire protocol, TCP transport, SWIM-based failure detection and membership gossip, a CRDT-based global name registry, and connection management with automatic reconnection. Note that `rebar-cluster` still uses tokio internally for its transport layer. The `rebar` facade crate re-exports everything from both core and cluster through a single unified interface, while `rebar-ffi` exposes a C-ABI layer that enables embedding the runtime in Go, Python, TypeScript, and any other language with C FFI support.
 
 This layering means applications that only need local concurrency can depend on `rebar-core` alone, paying zero cost for networking code they do not use. When distribution is needed, `rebar-cluster` adds it without requiring any changes to existing process logic -- a process sends a message to a `ProcessId` regardless of whether the target is local or remote.
 
@@ -17,12 +19,17 @@ graph TD
     end
 
     subgraph core["rebar-core"]
+        EX["executor<br>RebarExecutor,<br>Proactor (compio-driver)"]
+        IO["io<br>TcpListener, TcpStream,<br>LeaseIoBuf"]
+        TASK["task<br>RawTask, JoinHandle,<br>Rc-based waker vtable"]
+        TIME["time<br>sleep(), timeout(),<br>timer queue (BTreeMap)"]
         RT["runtime<br>Runtime, ProcessContext"]
         PROC["process<br>ProcessId, Message,<br>ExitReason, SendError"]
-        MB["mailbox<br>MailboxTx, MailboxRx,<br>Mailbox"]
-        TBL["table<br>ProcessTable,<br>ProcessHandle"]
+        MB["mailbox<br>MailboxTx, MailboxRx,<br>Mailbox (local-sync mpsc)"]
+        TBL["table<br>ProcessTable (RefCell),<br>ProcessHandle"]
         MON["monitor<br>MonitorRef,<br>MonitorSet, LinkSet"]
         SUP["supervisor<br>SupervisorSpec,<br>ChildSpec, engine"]
+        BRIDGE["bridge<br>ThreadBridge,<br>crossbeam + eventfd"]
     end
 
     subgraph cluster["rebar-cluster"]
@@ -49,9 +56,14 @@ graph TD
     CFFI --> RT
     CFFI --> PROC
 
+    RT --> EX
     RT --> TBL
     RT --> MB
     RT --> PROC
+    RT --> TASK
+    RT --> BRIDGE
+    EX --> IO
+    EX --> TIME
     TBL --> MB
     TBL --> PROC
     SUP --> RT
@@ -60,25 +72,24 @@ graph TD
 
 ## 3. Process Model
 
-Each process in Rebar is an independent asynchronous task running on the Tokio runtime. Processes are identified by a globally unique `ProcessId` consisting of a `(node_id: u64, local_id: u64)` pair, displayed as `<node_id.local_id>`. The `node_id` identifies which cluster node owns the process, while `local_id` is a monotonically incrementing counter allocated via `AtomicU64::fetch_add`.
+Each process in Rebar is an independent asynchronous task running on the RebarExecutor. Processes are identified by a globally unique `ProcessId` consisting of a `(node_id: u64, thread_id: u64, local_id: u64)` triple. The `node_id` identifies which cluster node owns the process, `thread_id` identifies the OS thread within the node, and `local_id` is a monotonically incrementing counter allocated via `Cell<u64>` (thread-local, no atomics needed).
 
 ### Process Lifecycle
 
 ```mermaid
 flowchart TD
-    SPAWN["Runtime::spawn()"] --> ALLOC["Allocate PID<br>AtomicU64::fetch_add"]
-    ALLOC --> MBOX["Create Mailbox<br>tokio mpsc channel<br>bounded or unbounded"]
+    SPAWN["Runtime::spawn()<br>(synchronous)"] --> ALLOC["Allocate PID<br>Cell&lt;u64&gt; increment"]
+    ALLOC --> MBOX["Create Mailbox<br>local-sync mpsc channel<br>(!Send)"]
     MBOX --> HANDLE["Create ProcessHandle<br>wraps MailboxTx"]
-    HANDLE --> INSERT["Insert into ProcessTable<br>DashMap&lt;ProcessId, ProcessHandle&gt;"]
-    INSERT --> TASK["Start tokio::spawn<br>outer task wraps inner task"]
-    TASK --> INNER["Inner tokio::spawn<br>runs handler(ProcessContext)"]
-    INNER --> HANDLER["Handler executes<br>ctx.recv(), ctx.send(),<br>ctx.self_pid()"]
+    HANDLE --> INSERT["Insert into ProcessTable<br>RefCell&lt;HashMap&lt;ProcessId, ProcessHandle&gt;&gt;"]
+    INSERT --> TASK["Spawn RawTask on<br>RebarExecutor<br>(Rc-based waker vtable)"]
+    TASK --> HANDLER["Handler executes<br>ctx.recv(), ctx.send(),<br>ctx.self_pid()"]
 
     HANDLER --> NORMAL["Return normally"]
     HANDLER --> PANIC["Panic!"]
 
-    NORMAL --> CLEANUP["Outer task awaits inner<br>Always runs cleanup"]
-    PANIC --> CATCH["tokio catches panic<br>via JoinHandle"]
+    NORMAL --> CLEANUP["Cleanup runs<br>via drop or completion"]
+    PANIC --> CATCH["catch_unwind<br>catches panic"]
     CATCH --> CLEANUP
 
     CLEANUP --> REMOVE["Remove from ProcessTable<br>table.remove(&pid)"]
@@ -88,7 +99,7 @@ flowchart TD
     style REMOVE fill:#95a5a6,color:#fff
 ```
 
-**Panic isolation** is a core design principle. Each process handler runs inside a nested `tokio::spawn` -- the outer task spawns an inner task containing the actual handler, then awaits the inner task's `JoinHandle`. If the handler panics, Tokio catches the panic and returns a `JoinError` rather than propagating it. The outer task always executes cleanup (removing the process from the table) regardless of whether the inner task completed normally or panicked. This means a single misbehaving process can never crash the runtime or affect other processes.
+**Panic isolation** is a core design principle. Each process handler runs inside a `catch_unwind` boundary. If the handler panics, the panic is caught and the process is cleaned up (removed from the table) without affecting other processes or the executor. Tasks use an Rc-based waker vtable with `JoinHandle` supporting drop-cancellation and `detach()`. This means a single misbehaving process can never crash the runtime or affect other processes.
 
 **ProcessContext** is the handle each process receives, providing three capabilities:
 - `self_pid()` -- returns the process's own `ProcessId`
@@ -101,24 +112,30 @@ Messages in Rebar are structs containing a sender `ProcessId`, a `rmpv::Value` p
 
 ### Local Messaging
 
+Local messaging uses the thread-local `ProcessTable` (`RefCell<HashMap>`) and `local-sync` mpsc channels, which are `!Send`. All local message passing stays on a single OS thread with zero atomic operations.
+
 ```mermaid
 sequenceDiagram
     participant Sender as Sender Process
-    participant Table as ProcessTable<br>(DashMap)
-    participant TX as MailboxTx<br>(mpsc sender)
-    participant RX as MailboxRx<br>(mpsc receiver)
+    participant Table as ProcessTable<br>(RefCell&lt;HashMap&gt;)
+    participant TX as MailboxTx<br>(local-sync mpsc sender)
+    participant RX as MailboxRx<br>(local-sync mpsc receiver)
     participant Handler as Receiver Process
 
     Sender->>Table: table.send(dest_pid, msg)
-    Table->>Table: processes.get(&pid)
+    Table->>Table: processes.borrow().get(&pid)
     alt PID found
         Table->>TX: handle.send(msg)
-        TX->>RX: channel delivery<br>(unbounded: always succeeds,<br>bounded: try_send semantics)
+        TX->>RX: channel delivery<br>(!Send, thread-local)
         RX->>Handler: ctx.recv().await
     else PID not found
         Table-->>Sender: Err(SendError::ProcessDead)
     end
 ```
+
+### Cross-Thread Messaging
+
+When a process sends to a PID on a different thread (same node), the message is routed through the `ThreadBridge` -- crossbeam channels with eventfd (Linux) or self-pipe (non-Linux) for waking the target thread's executor.
 
 ### Remote Messaging
 
@@ -282,6 +299,8 @@ The supervisor tracks restart timestamps in a `VecDeque<Instant>` sliding window
 - **BrutalKill** -- terminate the child immediately without waiting
 
 ## 6. SWIM Protocol
+
+> **Note:** The SWIM protocol, wire protocol, CRDT registry, and connection management (sections 6-9) live in `rebar-cluster`, which still uses tokio internally for its transport layer. These sections describe the cluster architecture unchanged from its tokio-based implementation.
 
 Rebar uses the SWIM (Scalable Weakly-consistent Infection-style process group Membership) protocol for cluster membership and failure detection. The implementation lives in the `rebar-cluster::swim` module.
 
@@ -511,6 +530,8 @@ See [Node Drain Internals](internals/node-drain.md) for the full protocol specif
 ## 10. FFI Layer
 
 The `rebar-ffi` crate provides a C-ABI interface that enables embedding the Rebar runtime in any language with C FFI support. It exposes opaque handle types and a set of `extern "C"` functions following Rust's `#[unsafe(no_mangle)]` convention.
+
+> **Note:** `rebar-ffi` wraps the core runtime with a tokio bridge for FFI compatibility. The internal `RebarRuntime` struct still creates a `tokio::runtime::Runtime` to drive async operations from synchronous FFI calls. Migrating to expose `RebarExecutor` directly is a future goal.
 
 ### FFI Architecture
 

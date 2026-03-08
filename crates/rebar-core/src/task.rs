@@ -1,6 +1,8 @@
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -110,9 +112,56 @@ fn do_wake(data: &WakerData) {
     }
 }
 
+/// A future adapter that catches panics from the inner future's `poll`.
+struct CatchUnwind<F> {
+    future: F,
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = Result<F::Output, Box<dyn Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: We only project the pin to the inner future field.
+        let future = unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().future) };
+        match std::panic::catch_unwind(AssertUnwindSafe(|| future.poll(cx))) {
+            Ok(Poll::Ready(val)) => Poll::Ready(Ok(val)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
+
+/// Error returned by [`JoinHandle`] when the spawned task panicked.
+#[derive(Debug)]
+pub enum JoinError {
+    /// The task panicked with the given message.
+    Panicked(String),
+}
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinError::Panicked(msg) => write!(f, "task panicked: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for JoinError {}
+
+fn panic_message(payload: &Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Shared state between a spawned task and its JoinHandle.
 struct TaskState<T> {
     result: Cell<Option<T>>,
+    panic_message: Cell<Option<String>>,
     waker: Cell<Option<Waker>>,
     completed: Cell<bool>,
     /// Shared cancellation flag — when set, the executor will skip this task.
@@ -131,11 +180,16 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> Future for JoinHandle<T> {
-    type Output = T;
+    type Output = Result<T, JoinError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T, JoinError>> {
         if self.state.completed.get() {
-            Poll::Ready(self.state.result.take().expect("JoinHandle result already taken"))
+            match self.state.result.take() {
+                Some(val) => Poll::Ready(Ok(val)),
+                None => Poll::Ready(Err(JoinError::Panicked(
+                    self.state.panic_message.take().unwrap_or_default(),
+                ))),
+            }
         } else {
             self.state.waker.set(Some(cx.waker().clone()));
             Poll::Pending
@@ -175,6 +229,7 @@ where
 
     let state = Rc::new(TaskState {
         result: Cell::new(None),
+        panic_message: Cell::new(None),
         waker: Cell::new(None),
         completed: Cell::new(false),
         cancelled: Rc::clone(&cancelled),
@@ -182,8 +237,17 @@ where
 
     let state_clone = Rc::clone(&state);
     let wrapper = async move {
-        let result = future.await;
-        state_clone.result.set(Some(result));
+        match (CatchUnwind { future }).await {
+            Ok(result) => {
+                state_clone.result.set(Some(result));
+            }
+            Err(payload) => {
+                let msg = panic_message(&payload);
+                tracing::error!("task panicked: {}", msg);
+                state_clone.panic_message.set(Some(msg));
+            }
+        }
+        // Always runs — even after panic
         state_clone.completed.set(true);
         if let Some(waker) = state_clone.waker.take() {
             waker.wake();
@@ -221,8 +285,8 @@ mod tests {
         let noop = noop_waker();
         let mut cx = Context::from_waker(&noop);
         match Pin::new(&mut handle).poll(&mut cx) {
-            Poll::Ready(val) => assert_eq!(val, 42),
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Ready(Ok(val)) => assert_eq!(val, 42),
+            other => panic!("expected Ready(Ok(42)), got {:?}", other),
         }
     }
 
@@ -264,6 +328,22 @@ mod tests {
         // Polling the cancelled task should return true (done)
         let waker = task_waker(Rc::clone(&raw), Rc::clone(&run_queue));
         assert!(raw.poll(&waker));
+    }
+
+    #[test]
+    fn panicked_task_resolves_join_handle_with_error() {
+        let run_queue = Rc::new(RefCell::new(VecDeque::new()));
+        let (raw, mut handle) = create_task(async { panic!("boom") });
+
+        let waker = task_waker(Rc::clone(&raw), Rc::clone(&run_queue));
+        assert!(raw.poll(&waker));
+
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        match Pin::new(&mut handle).poll(&mut cx) {
+            Poll::Ready(Err(JoinError::Panicked(msg))) => assert_eq!(msg, "boom"),
+            other => panic!("expected Ready(Err(Panicked)), got {:?}", other),
+        }
     }
 
     /// A minimal no-op waker for tests.

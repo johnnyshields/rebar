@@ -225,7 +225,7 @@ impl TcpListener {
         let peer_addr = SockRef::from(&fd)
             .peer_addr()?
             .as_socket()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid peer address"))?;
+            .ok_or_else(|| io::Error::other("invalid peer address"))?;
 
         Ok((TcpStream { fd: SharedFd::new(fd) }, peer_addr))
     }
@@ -235,7 +235,7 @@ impl TcpListener {
         SockRef::from(&*self.fd)
             .local_addr()?
             .as_socket()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid local address"))
+            .ok_or_else(|| io::Error::other("invalid local address"))
     }
 }
 
@@ -350,7 +350,7 @@ impl TcpStream {
         SockRef::from(&*self.fd)
             .peer_addr()?
             .as_socket()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid peer address"))
+            .ok_or_else(|| io::Error::other("invalid peer address"))
     }
 
     /// Returns the local address of this stream.
@@ -358,7 +358,7 @@ impl TcpStream {
         SockRef::from(&*self.fd)
             .local_addr()?
             .as_socket()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid local address"))
+            .ok_or_else(|| io::Error::other("invalid local address"))
     }
 }
 
@@ -425,7 +425,7 @@ mod tests {
             };
 
             // Give the accept a chance to complete by yielding.
-            crate::executor::spawn(async {}).await;
+            crate::executor::spawn(async {}).await.unwrap();
 
             // Write a message.
             let msg = b"hello".to_vec();
@@ -438,7 +438,7 @@ mod tests {
             let n = result.unwrap();
             assert_eq!(&buf[..n], b"hello");
 
-            echo.await;
+            echo.await.unwrap();
         });
     }
 
@@ -477,7 +477,7 @@ mod tests {
                 fd: SharedFd::new(client_fd),
             };
 
-            crate::executor::spawn(async {}).await;
+            crate::executor::spawn(async {}).await.unwrap();
 
             let msg = b"hello leased".to_vec();
             let BufResult(result, _) = client.write(msg).await;
@@ -488,7 +488,7 @@ mod tests {
             let n = result.unwrap();
             assert_eq!(&buf[..n], b"hello leased");
 
-            echo.await;
+            echo.await.unwrap();
         });
     }
 

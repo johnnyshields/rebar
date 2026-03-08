@@ -158,10 +158,10 @@ impl ProcessTable {
         if let Some(pid) = self.names.borrow().get(name).copied() {
             return Some(pid);
         }
-        if let Some(ref global) = self.global_registry {
-            if let Ok(map) = global.read() {
-                return map.get(name).map(|(_tid, pid)| *pid);
-            }
+        if let Some(ref global) = self.global_registry
+            && let Ok(map) = global.read()
+        {
+            return map.get(name).map(|(_tid, pid)| *pid);
         }
         None
     }

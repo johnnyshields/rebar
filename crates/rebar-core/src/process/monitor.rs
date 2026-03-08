@@ -19,6 +19,12 @@ impl MonitorRef {
     }
 }
 
+impl Default for MonitorRef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tracks monitor relationships: who is monitoring whom.
 ///
 /// Maintains a dual-index structure for efficient lookup by both
@@ -28,6 +34,12 @@ pub struct MonitorSet {
     by_ref: HashMap<MonitorRef, ProcessId>,
     /// Lookup from target process to all monitor refs watching it.
     by_target: HashMap<ProcessId, Vec<MonitorRef>>,
+}
+
+impl Default for MonitorSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MonitorSet {
@@ -54,12 +66,12 @@ impl MonitorSet {
     ///
     /// If the reference does not exist, this is a no-op.
     pub fn remove_monitor(&mut self, mref: MonitorRef) {
-        if let Some(target) = self.by_ref.remove(&mref) {
-            if let Some(refs) = self.by_target.get_mut(&target) {
-                refs.retain(|r| *r != mref);
-                if refs.is_empty() {
-                    self.by_target.remove(&target);
-                }
+        if let Some(target) = self.by_ref.remove(&mref)
+            && let Some(refs) = self.by_target.get_mut(&target)
+        {
+            refs.retain(|r| *r != mref);
+            if refs.is_empty() {
+                self.by_target.remove(&target);
             }
         }
     }
@@ -80,6 +92,12 @@ impl MonitorSet {
 /// no additional effect.
 pub struct LinkSet {
     links: HashSet<ProcessId>,
+}
+
+impl Default for LinkSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LinkSet {

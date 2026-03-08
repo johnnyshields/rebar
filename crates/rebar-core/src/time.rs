@@ -243,8 +243,8 @@ mod tests {
                 o2.borrow_mut().push(2);
             });
 
-            h1.await;
-            h2.await;
+            h1.await.unwrap();
+            h2.await.unwrap();
             order.borrow().clone()
         });
         assert_eq!(result, vec![2, 1]);
@@ -310,9 +310,9 @@ mod tests {
             let h1 = spawn(async { sleep(Duration::from_millis(50)).await; });
             let h2 = spawn(async { sleep(Duration::from_millis(50)).await; });
             let h3 = spawn(async { sleep(Duration::from_millis(50)).await; });
-            h1.await;
-            h2.await;
-            h3.await;
+            h1.await.unwrap();
+            h2.await.unwrap();
+            h3.await.unwrap();
         });
         // All 3 sleeps run concurrently, so total should be ~50ms, not 150ms
         assert!(start.elapsed() < Duration::from_millis(120));

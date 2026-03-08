@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -252,6 +253,30 @@ async fn dynamic_supervisor_loop(
     }
 }
 
+/// Guard that sends a `DynSupervisorMsg::ChildExited` on drop if not disarmed.
+struct DynPanicGuard {
+    msg_tx: local_mpsc::Tx<DynSupervisorMsg>,
+    pid: ProcessId,
+    armed: Cell<bool>,
+}
+
+impl DynPanicGuard {
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
+
+impl Drop for DynPanicGuard {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            let _ = self.msg_tx.send(DynSupervisorMsg::ChildExited {
+                pid: self.pid,
+                reason: ExitReason::Abnormal("panicked".into()),
+            });
+        }
+    }
+}
+
 fn spawn_dyn_child(
     factory: &ChildFactory,
     msg_tx: &local_mpsc::Tx<DynSupervisorMsg>,
@@ -263,14 +288,22 @@ fn spawn_dyn_child(
     let msg_tx = msg_tx.clone();
 
     let handle = crate::executor::spawn(async move {
+        let guard = DynPanicGuard {
+            msg_tx: msg_tx.clone(),
+            pid,
+            armed: Cell::new(true),
+        };
+
         let child_future = factory();
         use futures::future::{select, Either};
         match select(std::pin::pin!(shutdown_rx), std::pin::pin!(child_future)).await {
             Either::Right((reason, _shutdown)) => {
+                guard.disarm();
                 let _ = msg_tx.send(DynSupervisorMsg::ChildExited { pid, reason });
             }
             Either::Left((_shutdown, _child)) => {
-                // Shutdown requested
+                // Shutdown requested — disarm so no spurious exit message is sent
+                guard.disarm();
             }
         }
     });

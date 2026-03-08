@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -413,6 +414,34 @@ struct SupervisorState {
     restart_times: VecDeque<Instant>,
 }
 
+/// Guard that sends a `ChildExited` message on drop if not disarmed.
+/// Fires when `CatchUnwind` drops the inner future on panic — immediately,
+/// before `JoinHandle` resolves.
+struct PanicGuard {
+    msg_tx: local_mpsc::Tx<SupervisorMsg>,
+    child_id: String,
+    pid: ProcessId,
+    armed: Cell<bool>,
+}
+
+impl PanicGuard {
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            let _ = self.msg_tx.send(SupervisorMsg::ChildExited {
+                child_id: self.child_id.clone(),
+                pid: self.pid,
+                reason: ExitReason::Abnormal("panicked".into()),
+            });
+        }
+    }
+}
+
 fn start_child(
     child: &mut ChildState,
     child_id: &str,
@@ -432,6 +461,13 @@ fn start_child(
     child.shutdown_tx = Some(shutdown_tx);
 
     let handle = crate::executor::spawn(async move {
+        let guard = PanicGuard {
+            msg_tx: msg_tx.clone(),
+            child_id: child_id.clone(),
+            pid,
+            armed: Cell::new(true),
+        };
+
         let child_future = factory();
 
         use futures::future::{select, Either};
@@ -440,6 +476,8 @@ fn start_child(
             Either::Right((exit, _shutdown)) => exit,
         };
 
+        // Normal exit — disarm guard, send reason ourselves
+        guard.disarm();
         let _ = msg_tx.send(SupervisorMsg::ChildExited {
             child_id,
             pid,
@@ -628,6 +666,40 @@ mod tests {
             );
             sleep(Duration::from_millis(300)).await;
             assert_eq!(sc.load(Ordering::SeqCst), 1);
+            handle.shutdown();
+            sleep(Duration::from_millis(100)).await;
+        });
+    }
+
+    #[test]
+    fn supervisor_restarts_panicked_child() {
+        let ex = test_executor();
+        ex.block_on(async {
+            let rt = Runtime::new(1);
+            let sc = Arc::new(AtomicU32::new(0));
+            let scc = Arc::clone(&sc);
+            let entries = vec![ChildEntry::new(ChildSpec::new("panicker"), move || {
+                let s = Arc::clone(&scc);
+                async move {
+                    let count = s.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        panic!("first run panics");
+                    }
+                    // Second run succeeds and stays alive
+                    sleep(Duration::from_secs(60)).await;
+                    ExitReason::Normal
+                }
+            })];
+            let handle = start_supervisor(
+                &rt,
+                SupervisorSpec::new(RestartStrategy::OneForOne)
+                    .max_restarts(5)
+                    .max_seconds(10),
+                entries,
+            );
+            sleep(Duration::from_millis(500)).await;
+            // Should have run twice: first panicked, then restarted
+            assert_eq!(sc.load(Ordering::SeqCst), 2);
             handle.shutdown();
             sleep(Duration::from_millis(100)).await;
         });
