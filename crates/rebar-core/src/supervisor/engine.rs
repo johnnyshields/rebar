@@ -326,11 +326,9 @@ async fn stop_child(child: &mut ChildState) {
                 // Drop the sender immediately (signals shutdown)
                 drop(tx);
             }
-            ShutdownStrategy::Timeout(duration) => {
-                // Send shutdown signal and wait up to the timeout
+            ShutdownStrategy::Timeout(_duration) => {
+                // Send shutdown signal
                 let _ = tx.send(());
-                // Give a brief moment for the task to process
-                tokio::time::sleep(Duration::from_millis(1).min(*duration)).await;
             }
         }
     }
